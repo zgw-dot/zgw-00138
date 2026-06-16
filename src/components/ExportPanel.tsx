@@ -35,13 +35,48 @@ export default function ExportPanel() {
   const showIgnored = useStore((s) => s.showIgnored);
   const riskLevelFilter = useStore((s) => s.riskLevelFilter);
   const currentTime = useStore((s) => s.currentTime);
-  const camera = useStore((s) => s.camera);
 
-  const snapshots = useStore((s) => s.getCurrentJobSnapshots());
-  const currentSnapshot = useStore((s) => s.getCurrentSnapshot());
+  const snapshotsMap = useStore((s) => s.snapshots);
+  const currentJobId = useStore((s) => s.currentJobId);
   const currentSnapshotId = useStore((s) => s.currentSnapshotId);
-  const filterChanged = useStore((s) => s.checkFilterChanged());
-  const canUndo = useStore((s) => s.canUndo());
+  const snapshotHistory = useStore((s) => s.snapshotHistory);
+  const filterShowIgnored = useStore((s) => s.showIgnored);
+  const filterRiskLevelFilter = useStore((s) => s.riskLevelFilter);
+  const filterIgnoredRiskIds = useStore((s) => s.ignoredRiskIds);
+
+  const snapshots = useMemo(() => {
+    if (!currentJobId) return [];
+    return snapshotsMap[currentJobId] ?? [];
+  }, [snapshotsMap, currentJobId]);
+
+  const currentSnapshot = useMemo(() => {
+    if (!currentJobId || !currentSnapshotId) return null;
+    const jobSnapshots = snapshotsMap[currentJobId];
+    if (!jobSnapshots) return null;
+    return jobSnapshots.find((s) => s.id === currentSnapshotId) ?? null;
+  }, [snapshotsMap, currentJobId, currentSnapshotId]);
+
+  const canUndo = useMemo(() => {
+    return snapshotHistory.length > 0;
+  }, [snapshotHistory]);
+
+  const filterChanged = useMemo(() => {
+    if (!currentSnapshot) return false;
+    const f1 = {
+      showIgnored: filterShowIgnored,
+      riskLevelFilter: filterRiskLevelFilter,
+      ignoredRiskIds: filterIgnoredRiskIds,
+    };
+    const f2 = currentSnapshot.filter;
+    return !(
+      f1.showIgnored === f2.showIgnored &&
+      f1.riskLevelFilter.safe === f2.riskLevelFilter.safe &&
+      f1.riskLevelFilter.warning === f2.riskLevelFilter.warning &&
+      f1.riskLevelFilter.danger === f2.riskLevelFilter.danger &&
+      f1.ignoredRiskIds.length === f2.ignoredRiskIds.length &&
+      f1.ignoredRiskIds.every((id) => f2.ignoredRiskIds.includes(id))
+    );
+  }, [currentSnapshot, filterShowIgnored, filterRiskLevelFilter, filterIgnoredRiskIds]);
 
   const createExportSnapshot = useStore((s) => s.createExportSnapshot);
   const saveSnapshot = useStore((s) => s.saveSnapshot);

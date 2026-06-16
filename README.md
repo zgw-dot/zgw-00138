@@ -1,57 +1,213 @@
-# React + TypeScript + Vite
+# 吊装作业 3D 复盘标注系统
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+基于 React + Three.js 的吊装过程三维可视化复盘与风险标注工具。
 
-Currently, two official plugins are available:
+## 功能特性
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
+- **3D 场景回放**：基于 Three.js + react-three-fiber 的吊装轨迹回放
+- **风险批注**：在时间轴任意位置添加、编辑、删除风险批注（安全/警告/危险三级）
+- **风险筛选**：按风险等级多选筛选，支持一键忽略/显示已忽略风险
+- **复盘快照**：将任意时刻的镜头、时间轴位置、筛选条件、可见批注固化为不可变快照
+  - 快照命名保存、覆盖更新、撤销最近一次改动
+  - 作业间隔离，切换作业快照不串档
+  - 刷新/重开后快照仍可用（localStorage 持久化）
+- **报告导出**：
+  - JSON：完整作业元数据 + 轨迹 + 批注 + 快照信息
+  - CSV：轨迹表格 + 批注表格，可直接用 Excel 打开
+  - 所有导出均基于快照，不受导出时筛选条件变动影响
+- **相机预置**：俯视/侧视/正视/跟随吊钩等常用视角
 
-## Expanding the ESLint configuration
+## 启动项目
 
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
+### 环境要求
+- Node.js >= 18
+- npm >= 9
 
-```js
-export default tseslint.config({
-  extends: [
-    // Remove ...tseslint.configs.recommended and replace with this
-    ...tseslint.configs.recommendedTypeChecked,
-    // Alternatively, use this for stricter rules
-    ...tseslint.configs.strictTypeChecked,
-    // Optionally, add this for stylistic rules
-    ...tseslint.configs.stylisticTypeChecked,
-  ],
-  languageOptions: {
-    // other options...
-    parserOptions: {
-      project: ['./tsconfig.node.json', './tsconfig.app.json'],
-      tsconfigRootDir: import.meta.dirname,
-    },
-  },
-})
+### 安装依赖
+```bash
+npm install
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+### 开发模式
+```bash
+npm run dev
+```
+默认启动在 http://localhost:5173/
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
+### 生产构建
+```bash
+npm run build
+```
 
-export default tseslint.config({
-  extends: [
-    // other configs...
-    // Enable lint rules for React
-    reactX.configs['recommended-typescript'],
-    // Enable lint rules for React DOM
-    reactDom.configs.recommended,
-  ],
-  languageOptions: {
-    // other options...
-    parserOptions: {
-      project: ['./tsconfig.node.json', './tsconfig.app.json'],
-      tsconfigRootDir: import.meta.dirname,
+### 预览生产构建
+```bash
+npm run preview
+```
+默认启动在 http://localhost:4173/
+
+### 运行测试
+```bash
+npm test
+```
+
+### 类型检查
+```bash
+npm run check
+```
+
+## 完整操作流程（可复现）
+
+### 1. 加载数据
+
+方式 A：加载内置样例
+- 点击顶部工具栏「数据导入 ▼」→「加载样例数据」
+- 页面会自动载入一条包含多段轨迹和若干风险批注的示例作业
+
+方式 B：导入自定义 JSON
+- 点击「数据导入 ▼」→「导入 JSON」
+- 选择符合 schema 的吊装作业 JSON 文件
+- 系统会自动预检格式，有问题时在控制台输出错误列表
+
+### 2. 调整筛选条件
+
+加载完成后，右侧面板顶部的筛选区：
+- **风险等级**：安全/警告/危险三个可独立切换的开关，点击按钮切换显隐
+- **显示忽略 / 隐藏忽略**：右侧切换开关，控制是否显示被标记为「已忽略」的批注
+
+### 3. 生成导出快照
+
+点击左上角的「导出报告」按钮打开导出面板：
+
+1. 点击「新建」按钮
+2. 在弹窗中输入快照名称（默认已填充日期时间），点击「保存」
+3. 快照创建成功后，面板会显示：
+   - 当前快照名
+   - 风险数 / 批注数 / 已忽略数
+   - 本次使用的筛选条件描述
+   - 「覆盖更新」「撤销」「预览」三个操作按钮
+   - 历史快照列表（可切换）
+
+**快照固化的内容**（创建后不再变化）：
+- 时间轴当前播放位置
+- 3D 镜头的位置和朝向
+- 是否显示已忽略批注
+- 风险等级筛选开关状态
+- 当前可见的所有批注（带批注文本、等级、时间戳）
+- 作业元信息、完整轨迹、起重机配置、限制区域
+
+### 4. 预览快照内容
+
+点击「预览」按钮，面板底部会展开快照数据预览区：
+- 最多展示前 5 条批注，含文本、等级、时间戳、忽略状态
+- 超过 5 条会显示剩余数量提示
+
+### 5. 导出报告
+
+快照创建后，面板底部两个导出按钮从禁用变为可点：
+
+**导出 JSON**
+- 文件名格式：`吊装复盘_{作业名}_{快照名}_{日期}.json`
+- 内容结构：
+  ```json
+  {
+    "meta": { "name": "...", "date": "...", "craneId": "...", ... },
+    "crane": { ... },
+    "restrictedZones": [ ... ],
+    "trajectory": [ ... ],
+    "annotations": [ ... ],
+    "riskStats": { "total": N, "danger": N, "warning": N, "safe": N, "ignored": N, "visible": N, "exported": N },
+    "exportedAt": "...",
+    "snapshotInfo": {
+      "id": "...", "name": "...", "createdAt": "...",
+      "updatedAt": "...", "currentTime": N, "camera": { ... }
     },
-  },
-})
+    "exportOptions": {
+      "includeIgnored": true/false,
+      "riskLevelFilter": { "safe": t/f, "warning": t/f, "danger": t/f },
+      "ignoredCount": N, "visibleCount": N, "exportedCount": N
+    }
+  }
+  ```
+
+**导出 CSV**
+- 文件名格式：`吊装复盘_{作业名}_{快照名}_{日期}.csv`
+- 内容按区块分为：
+  1. 快照信息（名称、ID、创建/更新时间、时间轴位置、相机信息）
+  2. 筛选条件（是否含忽略、各等级开关、忽略列表）
+  3. 轨迹数据表格
+  4. 风险批注表格
+  5. 风险统计汇总
+
+### 6. 核对导出结果
+
+**JSON 核对**：
+1. 用任意文本编辑器打开导出的 `.json` 文件
+2. 核对 `riskStats.exported` 与面板上显示的批注数一致
+3. 核对 `exportOptions.riskLevelFilter` 与创建快照时的筛选条件一致
+4. 数 `annotations` 数组长度应等于 `riskStats.exported`
+
+**CSV 核对**：
+1. 用 Excel 或 WPS 打开 `.csv` 文件（UTF-8 编码）
+2. 滚动到「风险统计」区块，对比批注总数、危险、警告、安全、已忽略各项数值
+3. 「风险批注」区块的行数应等于统计中的「可见/导出」数量
+
+### 7. 覆盖更新与撤销
+
+**覆盖更新**：
+- 若当前筛选条件或批注内容有改动，点击「覆盖更新」将用当前状态刷新快照内容
+- 更新前若筛选条件已变，会弹窗二次确认
+- 每次更新自动保存历史版本，可撤销
+
+**撤销**：
+- 点击「撤销」按钮回退到上一次覆盖更新前的版本
+- 可连续撤销，直到历史栈为空
+- 面板的「撤销」按钮在无可撤销时自动禁用
+
+### 8. 刷新 / 重开验证
+
+1. 创建好快照后，按 F5 刷新页面
+2. 页面重新加载后，打开「导出报告」面板
+3. 历史快照列表中仍可看到之前创建的快照
+4. 点击选中后，预览、JSON 导出、CSV 导出均可继续操作
+
+### 9. 切换作业隔离验证
+
+1. 为作业 A 创建若干快照并选中其中一个
+2. 导入另一份不同的作业数据（或再次点击「加载样例数据」导入不同内容）
+3. 打开导出面板：
+   - 当前选中状态已清空
+   - 历史快照列表只显示当前作业的快照（之前作业 A 的快照不出现）
+4. 再导回作业 A：原来的快照全部恢复可见
+
+## 常见注意事项
+
+**筛选条件变更提醒**：
+- 创建快照后，如修改了风险等级开关或「显示忽略」切换，面板顶部会出现黄色警告条
+- 此时导出会再次弹窗确认：数据仍以快照为准，建议先「覆盖更新」再导出
+
+**首屏白屏（已修复）**：
+- 问题根因：ExportPanel 中通过 `useStore((s) => s.getCurrentJobSnapshots())` 调用方法的方式订阅状态，方法在空状态时每次返回新的 `[]` 引用，配合 Scene3D 每 200ms 一次的相机状态同步，触发无限重渲染
+- 修复方案：将所有方法调用式 selector 改为直接订阅基础状态字段 + `useMemo` 派生；Scene3D 中 setCamera 增加浅比较去重，未变化时不触发 store 更新
+- 回归测试：`src/__tests__/import-export.test.ts` 中 `regression - infinite re-render / white screen` 分组 4 条用例
+
+## 目录结构
+
+```
+src/
+├── components/
+│   ├── Scene3D.tsx          # 3D 场景 + 相机控制器（含相机去重同步）
+│   ├── ExportPanel.tsx      # 导出面板（含快照管理）
+│   ├── AnnotationPanel.tsx  # 批注/筛选面板
+│   └── ...
+├── store/
+│   └── useStore.ts          # Zustand 全局状态 + 快照持久化
+├── utils/
+│   ├── export.ts            # 快照创建、JSON/CSV 导出
+│   └── validation.ts        # 导入预检与清洗
+├── types/
+│   └── index.ts             # 类型定义（含 ExportSnapshot）
+├── data/
+│   └── sampleData.ts        # 样例数据
+└── __tests__/
+    └── import-export.test.ts  # 导入/快照/导出测试（共 46 条）
 ```

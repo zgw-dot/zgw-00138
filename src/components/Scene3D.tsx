@@ -9,11 +9,45 @@ import WorkingRadius from "./WorkingRadius";
 import GroundGrid from "./GroundGrid";
 import { useStore } from "@/store/useStore";
 
+function cameraEqual(
+  a: { position: [number, number, number]; target: [number, number, number] },
+  b: { position: [number, number, number]; target: [number, number, number] }
+): boolean {
+  const EPS = 1e-4;
+  return (
+    Math.abs(a.position[0] - b.position[0]) < EPS &&
+    Math.abs(a.position[1] - b.position[1]) < EPS &&
+    Math.abs(a.position[2] - b.position[2]) < EPS &&
+    Math.abs(a.target[0] - b.target[0]) < EPS &&
+    Math.abs(a.target[1] - b.target[1]) < EPS &&
+    Math.abs(a.target[2] - b.target[2]) < EPS
+  );
+}
+
 function CameraController() {
   const { camera } = useThree();
   const controlsRef = useRef<any>(null);
   const lastSyncRef = useRef(0);
+  const lastCameraRef = useRef<{
+    position: [number, number, number];
+    target: [number, number, number];
+  } | null>(null);
   const setCamera = useStore((s) => s.setCamera);
+
+  const syncCamera = useCallback(
+    (
+      position: [number, number, number],
+      target: [number, number, number]
+    ) => {
+      const next = { position, target };
+      if (lastCameraRef.current && cameraEqual(lastCameraRef.current, next)) {
+        return;
+      }
+      lastCameraRef.current = next;
+      setCamera(next);
+    },
+    [setCamera]
+  );
 
   const goToPreset = useCallback(
     (position: [number, number, number], target: [number, number, number]) => {
@@ -25,9 +59,9 @@ function CameraController() {
         controlsRef.current.target.set(...target);
         controlsRef.current.update();
       }
-      setCamera({ position, target });
+      syncCamera(position, target);
     },
-    [camera, setCamera]
+    [camera, syncCamera]
   );
 
   useEffect(() => {
@@ -73,10 +107,10 @@ function CameraController() {
     if (now - lastSyncRef.current > 200 && controlsRef.current) {
       const pos = camera.position;
       const target = controlsRef.current.target;
-      setCamera({
-        position: [pos.x, pos.y, pos.z] as [number, number, number],
-        target: [target.x, target.y, target.z] as [number, number, number],
-      });
+      syncCamera(
+        [pos.x, pos.y, pos.z] as [number, number, number],
+        [target.x, target.y, target.z] as [number, number, number]
+      );
       lastSyncRef.current = now;
     }
   });

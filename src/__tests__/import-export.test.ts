@@ -1001,3 +1001,231 @@ describe("snapshot - export consistency after undo", () => {
     expect(restoredRows).toEqual(v1Rows);
   });
 });
+
+describe("regression - infinite re-render / white screen", () => {
+  const baseJob = makeValidJob();
+  const defaultCamera = {
+    position: [0, 80, 0.1] as [number, number, number],
+    target: [0, 0, 0] as [number, number, number],
+  };
+  const allLevels: RiskLevelFilter = { safe: true, warning: true, danger: true };
+
+  beforeEach(async () => {
+    const { useStore } = await import("@/store/useStore");
+    useStore.setState({
+      job: null,
+      currentTime: 0,
+      annotations: [],
+      ignoredRiskIds: [],
+      showIgnored: true,
+      riskLevelFilter: allLevels,
+      camera: defaultCamera,
+      snapshots: {},
+      currentSnapshotId: null,
+      currentJobId: null,
+      snapshotHistory: [],
+      cameraPresets: [],
+      lastImportSuccess: null,
+      lastImportFailure: null,
+    });
+  });
+
+  it("high-frequency camera updates do not change snapshot list identity when empty", async () => {
+    const { useStore } = await import("@/store/useStore");
+    const store = useStore;
+
+    store.getState().importJob(baseJob);
+
+    const selectSnapshots = (s: ReturnType<typeof store.getState>) => {
+      if (!s.currentJobId) return [];
+      return s.snapshots[s.currentJobId] ?? [];
+    };
+
+    const state1 = store.getState();
+    const snap1 = selectSnapshots(state1);
+
+    store.getState().setCamera({
+      position: [0.0001, 80.0001, 0.1],
+      target: [0.0001, 0.0001, 0.0001],
+    });
+    const state2 = store.getState();
+    const snap2 = selectSnapshots(state2);
+
+    expect(snap1).toEqual(snap2);
+    expect(snap1).toStrictEqual(snap2);
+    expect(state1.snapshots).toBe(state2.snapshots);
+    expect(state1.currentJobId).toBe(state2.currentJobId);
+  });
+
+  it("high-frequency camera updates do not change current snapshot identity", async () => {
+    const { useStore } = await import("@/store/useStore");
+    const store = useStore;
+
+    store.getState().importJob(baseJob);
+    const annotations = makeAnnotations(2, "danger", 0);
+    store.setState({ annotations });
+    const snapshot = store.getState().createExportSnapshot("回归测试快照");
+    store.getState().saveSnapshot(snapshot);
+
+    const selectCurrentSnapshot = (s: ReturnType<typeof store.getState>) => {
+      if (!s.currentJobId || !s.currentSnapshotId) return null;
+      const list = s.snapshots[s.currentJobId];
+      if (!list) return null;
+      return list.find((sn) => sn.id === s.currentSnapshotId) ?? null;
+    };
+
+    const prev = selectCurrentSnapshot(store.getState());
+    expect(prev).not.toBeNull();
+
+    for (let i = 0; i < 20; i++) {
+      store.getState().setCamera({
+        position: [i * 0.0001, 80, 0.1],
+        target: [i * 0.0001, 0, 0],
+      });
+    }
+
+    const curr = selectCurrentSnapshot(store.getState());
+    expect(curr).toBe(prev);
+    expect(curr!.id).toBe(snapshot.id);
+  });
+
+  it("selector derived values are stable across unrelated updates", async () => {
+    const { useStore } = await import("@/store/useStore");
+    const store = useStore;
+
+    store.getState().importJob(baseJob);
+    const annotations = makeAnnotations(3, "danger", 0);
+    store.setState({ annotations });
+    const snapshot = store.getState().createExportSnapshot("稳定性测试");
+    store.getState().saveSnapshot(snapshot);
+
+    let canUndoCallCount = 0;
+    let filterChangedCallCount = 0;
+    let snapshotListCallCount = 0;
+
+    const subscribeSelect = <T,>(
+      selector: (s: ReturnType<typeof store.getState>) => T,
+      counter: { current: number }
+    ) => {
+      let last: T = Symbol() as unknown as T;
+      return store.subscribe((s) => {
+        const next = selector(s);
+        if (next !== last) {
+          counter.current++;
+          last = next;
+        }
+      });
+    };
+
+    const canUndoCounter = { current: 0 };
+    const filterChangedCounter = { current: 0 };
+    const snapshotListCounter = { current: 0 };
+
+    const canUndoSel = (s: ReturnType<typeof store.getState>) =>
+      s.snapshotHistory.length > 0;
+    const filterChangedSel = (s: ReturnType<typeof store.getState>) => {
+      if (!s.currentJobId || !s.currentSnapshotId) return false;
+      const list = s.snapshots[s.currentJobId];
+      const snap = list?.find((sn) => sn.id === s.currentSnapshotId);
+      if (!snap) return false;
+      const f1 = {
+        showIgnored: s.showIgnored,
+        riskLevelFilter: s.riskLevelFilter,
+        ignoredRiskIds: s.ignoredRiskIds,
+      };
+      const f2 = snap.filter;
+      return !(
+        f1.showIgnored === f2.showIgnored &&
+        f1.riskLevelFilter.safe === f2.riskLevelFilter.safe &&
+        f1.riskLevelFilter.warning === f2.riskLevelFilter.warning &&
+        f1.riskLevelFilter.danger === f2.riskLevelFilter.danger &&
+        f1.ignoredRiskIds.length === f2.ignoredRiskIds.length &&
+        f1.ignoredRiskIds.every((id) => f2.ignoredRiskIds.includes(id))
+      );
+    };
+    const snapshotListSel = (s: ReturnType<typeof store.getState>) => {
+      if (!s.currentJobId) return [];
+      return s.snapshots[s.currentJobId] ?? [];
+    };
+
+    const unsub1 = store.subscribe((s) => {
+      const v = canUndoSel(s);
+      canUndoCounter.current++;
+    });
+    const unsub2 = store.subscribe((s) => {
+      const v = filterChangedSel(s);
+      filterChangedCounter.current++;
+    });
+    const unsub3 = store.subscribe((s) => {
+      const v = snapshotListSel(s);
+      snapshotListCounter.current++;
+    });
+
+    try {
+      for (let i = 0; i < 50; i++) {
+        store.getState().setCamera({
+          position: [i * 0.0001, 80, 0.1],
+          target: [i * 0.0001, 0, 0],
+        });
+      }
+
+      expect(canUndoSel(store.getState())).toBe(false);
+      expect(filterChangedSel(store.getState())).toBe(false);
+      expect(snapshotListSel(store.getState()).length).toBe(1);
+
+      const totalUpdates = canUndoCounter.current + filterChangedCounter.current;
+      expect(totalUpdates).toBeGreaterThan(0);
+
+      const canUndoStable = canUndoSel(store.getState()) === false;
+      const filterChangedStable = filterChangedSel(store.getState()) === false;
+      expect(canUndoStable).toBe(true);
+      expect(filterChangedStable).toBe(true);
+    } finally {
+      unsub1();
+      unsub2();
+      unsub3();
+    }
+  });
+
+  it("import sample -> create snapshot -> preview -> export JSON -> export CSV full chain works", async () => {
+    const { useStore } = await import("@/store/useStore");
+    const store = useStore;
+
+    const importResult = store.getState().importJob(baseJob);
+    expect(importResult.success).toBe(true);
+
+    const annotations = [
+      ...makeAnnotations(2, "danger", 0),
+      ...makeAnnotations(3, "warning", 2),
+    ];
+    store.setState({ annotations });
+    expect(store.getState().annotations).toHaveLength(5);
+
+    const snapshot = store.getState().createExportSnapshot("链路测试快照");
+    store.getState().saveSnapshot(snapshot);
+    expect(snapshot.annotations).toHaveLength(5);
+
+    const currentSnap = store.getState().getCurrentSnapshot();
+    expect(currentSnap).not.toBeNull();
+    expect(currentSnap!.annotations).toHaveLength(5);
+
+    const previewAnnotations = currentSnap!.annotations;
+    expect(previewAnnotations.length).toBe(5);
+
+    const json = exportToJSONFromSnapshot(currentSnap!);
+    const parsed = JSON.parse(json);
+    expect(parsed.annotations.length).toBe(5);
+    expect(parsed.riskStats.danger).toBe(2);
+    expect(parsed.riskStats.warning).toBe(3);
+    expect(parsed.snapshotInfo.name).toBe("链路测试快照");
+
+    const csv = exportToCSVFromSnapshot(currentSnap!);
+    const annRows = csv.split("\n").filter((l) => l.startsWith("ann-"));
+    expect(annRows.length).toBe(5);
+
+    const headerSection = csv.split("=== 风险统计 ===")[1];
+    expect(headerSection).toContain("批注总数,5");
+    expect(headerSection).toContain("危险,2");
+    expect(headerSection).toContain("警告,3");
+  });
+});
