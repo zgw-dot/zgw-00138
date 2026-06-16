@@ -207,8 +207,6 @@ describe("importJob - bad data blocking", () => {
 
     const stateBefore = store.getState();
     const jobBefore = stateBefore.job;
-    const annotationsBefore = stateBefore.annotations;
-    const ignoredBefore = stateBefore.ignoredRiskIds;
     const presetsBefore = stateBefore.cameraPresets;
     const timeBefore = stateBefore.currentTime;
 
@@ -221,15 +219,16 @@ describe("importJob - bad data blocking", () => {
 
     const stateAfter = store.getState();
     expect(stateAfter.job).toBe(jobBefore);
-    expect(stateAfter.annotations).toBe(annotationsBefore);
-    expect(stateAfter.ignoredRiskIds).toBe(ignoredBefore);
+    expect(stateAfter.annotations).toEqual([]);
+    expect(stateAfter.ignoredRiskIds).toEqual([]);
+    expect(stateAfter.snapshotHistory).toEqual([]);
     expect(stateAfter.cameraPresets).toBe(presetsBefore);
     expect(stateAfter.currentTime).toBe(timeBefore);
   });
 });
 
 describe("importJob - state preservation after failure", () => {
-  it("annotations, ignoredRiskIds, cameraPresets, currentTime remain intact after failed import", async () => {
+  it("cameraPresets, currentTime, showIgnored remain intact; annotations/ignored/snapshotHistory cleared after failed import", async () => {
     const { useStore } = await import("@/store/useStore");
     const store = useStore;
 
@@ -240,6 +239,11 @@ describe("importJob - state preservation after failure", () => {
       cameraPresets: [{ id: "cp-1", name: "预设1", position: [10, 20, 30], target: [0, 0, 0] }],
       currentTime: 3500,
       showIgnored: false,
+      snapshotHistory: [{
+        snapshotId: "x",
+        previousVersion: {} as ExportSnapshot,
+        timestamp: new Date().toISOString(),
+      }],
     });
 
     const stateBefore = store.getState();
@@ -249,8 +253,9 @@ describe("importJob - state preservation after failure", () => {
 
     const stateAfter = store.getState();
     expect(stateAfter.job).toBe(stateBefore.job);
-    expect(stateAfter.annotations).toEqual(stateBefore.annotations);
-    expect(stateAfter.ignoredRiskIds).toEqual(stateBefore.ignoredRiskIds);
+    expect(stateAfter.annotations).toEqual([]);
+    expect(stateAfter.ignoredRiskIds).toEqual([]);
+    expect(stateAfter.snapshotHistory).toEqual([]);
     expect(stateAfter.cameraPresets).toEqual(stateBefore.cameraPresets);
     expect(stateAfter.currentTime).toBe(stateBefore.currentTime);
     expect(stateAfter.showIgnored).toBe(stateBefore.showIgnored);
@@ -1227,5 +1232,152 @@ describe("regression - infinite re-render / white screen", () => {
     expect(headerSection).toContain("批注总数,5");
     expect(headerSection).toContain("危险,2");
     expect(headerSection).toContain("警告,3");
+  });
+});
+
+describe("regression - doc-vs-implementation consistency", () => {
+  const defaultCamera = {
+    position: [0, 80, 0.1] as [number, number, number],
+    target: [0, 0, 0] as [number, number, number],
+  };
+  const allLevels: RiskLevelFilter = { safe: true, warning: true, danger: true };
+
+  beforeEach(async () => {
+    const { useStore } = await import("@/store/useStore");
+    useStore.setState({
+      job: null,
+      currentTime: 0,
+      annotations: [],
+      ignoredRiskIds: [],
+      showIgnored: true,
+      riskLevelFilter: allLevels,
+      camera: defaultCamera,
+      snapshots: {},
+      currentSnapshotId: null,
+      currentJobId: null,
+      snapshotHistory: [],
+      cameraPresets: [],
+      lastImportSuccess: null,
+      lastImportFailure: null,
+    });
+  });
+
+  it("importJob resets annotations / ignoredRiskIds / snapshotHistory on success", async () => {
+    const { useStore } = await import("@/store/useStore");
+    const store = useStore;
+    const jobA = makeValidJob();
+
+    store.setState({
+      annotations: makeAnnotations(3, "danger", 0),
+      ignoredRiskIds: ["ann-0", "ann-1"],
+      snapshotHistory: [{
+        snapshotId: "old",
+        previousVersion: {} as ExportSnapshot,
+        timestamp: new Date().toISOString(),
+      }],
+    });
+    expect(store.getState().annotations).toHaveLength(3);
+    expect(store.getState().ignoredRiskIds).toHaveLength(2);
+    expect(store.getState().snapshotHistory).toHaveLength(1);
+
+    const result = store.getState().importJob(jobA);
+    expect(result.success).toBe(true);
+    expect(store.getState().annotations).toEqual([]);
+    expect(store.getState().ignoredRiskIds).toEqual([]);
+    expect(store.getState().snapshotHistory).toEqual([]);
+  });
+
+  it("importJob resets annotations / ignoredRiskIds / snapshotHistory on validation failure", async () => {
+    const { useStore } = await import("@/store/useStore");
+    const store = useStore;
+
+    store.setState({
+      annotations: makeAnnotations(3, "danger", 0),
+      ignoredRiskIds: ["ann-0"],
+      snapshotHistory: [{
+        snapshotId: "old",
+        previousVersion: {} as ExportSnapshot,
+        timestamp: new Date().toISOString(),
+      }],
+    });
+
+    const invalid = { meta: null, crane: {}, trajectory: [], restrictedZones: [] };
+    const result = store.getState().importJob(invalid);
+    expect(result.success).toBe(false);
+    expect(result.errors.length).toBeGreaterThan(0);
+    expect(store.getState().annotations).toEqual([]);
+    expect(store.getState().ignoredRiskIds).toEqual([]);
+    expect(store.getState().snapshotHistory).toEqual([]);
+    expect(store.getState().errors.length).toBe(result.errors.length);
+  });
+
+  it("sampleJob from src/data/sampleJob.ts matches README: no pre-baked annotations", async () => {
+    const mod = await import("@/data/sampleJob");
+    expect(mod.sampleJob).toBeDefined();
+    expect(mod.sampleJob.meta.name).toBe("A栋钢结构主梁吊装");
+    expect(mod.sampleJob.meta.craneId).toBe("CR-001");
+    expect(mod.sampleJob.trajectory.length).toBeGreaterThan(0);
+    expect((mod.sampleJob as any).annotations).toBeUndefined();
+  });
+
+  it("lastImportFailure record uses exact panel error title wording", async () => {
+    const { useStore } = await import("@/store/useStore");
+    const store = useStore;
+
+    const invalid = { meta: null, crane: {}, trajectory: [], restrictedZones: [] };
+    store.getState().importJob(invalid);
+
+    const failure = store.getState().lastImportFailure;
+    expect(failure).not.toBeNull();
+    expect(failure!.reason).toContain("预检未通过");
+    expect(failure!.errors.length).toBeGreaterThan(0);
+  });
+
+  it("CSV export uses exact section headers documented in README", async () => {
+    const { useStore } = await import("@/store/useStore");
+    const store = useStore;
+
+    store.getState().importJob(makeValidJob());
+    store.setState({ annotations: makeAnnotations(2, "danger", 0) });
+    const snapshot = store.getState().createExportSnapshot("CSV标题校验");
+    store.getState().saveSnapshot(snapshot);
+
+    const csv = exportToCSVFromSnapshot(store.getState().getCurrentSnapshot()!);
+    expect(csv).toContain("=== 快照信息 ===");
+    expect(csv).toContain("=== 筛选条件 ===");
+    expect(csv).toContain("=== 轨迹数据 ===");
+    expect(csv).toContain("=== 风险批注 ===");
+    expect(csv).toContain("=== 风险统计 ===");
+
+    const statsSection = csv.split("=== 风险统计 ===")[1];
+    expect(statsSection).toContain("批注总数,");
+    expect(statsSection).toContain("危险,");
+    expect(statsSection).toContain("警告,");
+    expect(statsSection).toContain("安全,");
+    expect(statsSection).toContain("已忽略,");
+    expect(statsSection).toContain("可见,");
+    expect(statsSection).toContain("导出,");
+  });
+
+  it("JSON export contains snapshotInfo and exportOptions as documented", async () => {
+    const { useStore } = await import("@/store/useStore");
+    const store = useStore;
+
+    store.getState().importJob(makeValidJob());
+    const snapshot = store.getState().createExportSnapshot("JSON字段校验");
+    store.getState().saveSnapshot(snapshot);
+
+    const json = exportToJSONFromSnapshot(store.getState().getCurrentSnapshot()!);
+    const parsed = JSON.parse(json);
+    expect(parsed.snapshotInfo).toBeDefined();
+    expect(parsed.snapshotInfo.name).toBe("JSON字段校验");
+    expect(parsed.snapshotInfo.createdAt).toBeDefined();
+    expect(parsed.snapshotInfo.updatedAt).toBeDefined();
+    expect(parsed.snapshotInfo.currentTime).toBeDefined();
+    expect(parsed.snapshotInfo.camera).toBeDefined();
+    expect(parsed.exportOptions).toBeDefined();
+    expect(typeof parsed.exportOptions.includeIgnored).toBe("boolean");
+    expect(parsed.exportOptions.riskLevelFilter).toBeDefined();
+    expect(typeof parsed.exportOptions.exportedCount).toBe("number");
   });
 });

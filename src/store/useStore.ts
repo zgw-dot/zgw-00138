@@ -133,6 +133,9 @@ export const useStore = create<AppState>()(
           errors: [],
           currentJobId: jobId,
           currentSnapshotId: null,
+          annotations: [],
+          ignoredRiskIds: [],
+          snapshotHistory: [],
         });
       },
       importJob: (raw: unknown) => {
@@ -143,7 +146,13 @@ export const useStore = create<AppState>()(
             errors: result.errors,
             timestamp: new Date().toISOString(),
           };
-          set({ errors: result.errors, lastImportFailure: failureRecord });
+          set({
+            errors: result.errors,
+            lastImportFailure: failureRecord,
+            annotations: [],
+            ignoredRiskIds: [],
+            snapshotHistory: [],
+          });
           return { success: false, errors: result.errors };
         }
         const job = sanitizeJob(raw);
@@ -156,6 +165,9 @@ export const useStore = create<AppState>()(
           lastImportSuccess: new Date().toISOString(),
           currentJobId: jobId,
           currentSnapshotId: null,
+          annotations: [],
+          ignoredRiskIds: [],
+          snapshotHistory: [],
         });
         return { success: true, errors: [] };
       },
