@@ -1,6 +1,5 @@
 import { useState, useCallback, useMemo } from "react";
 import {
-  AlertTriangle,
   Plus,
   ToggleLeft,
   ToggleRight,
@@ -10,9 +9,11 @@ import {
   Check,
   Filter,
   MessageSquare,
+  BookTemplate,
+  Copy,
 } from "lucide-react";
 import { useStore } from "@/store/useStore";
-import type { Annotation } from "@/types";
+import type { AnnotationTemplate } from "@/types";
 
 export default function AnnotationPanel() {
   const annotations = useStore((s) => s.annotations);
@@ -29,6 +30,11 @@ export default function AnnotationPanel() {
   const setRiskLevelFilter = useStore((s) => s.setRiskLevelFilter);
   const rightPanelOpen = useStore((s) => s.rightPanelOpen);
   const setRightPanelOpen = useStore((s) => s.setRightPanelOpen);
+  const templates = useStore((s) => s.templates);
+  const addTemplate = useStore((s) => s.addTemplate);
+  const updateTemplate = useStore((s) => s.updateTemplate);
+  const deleteTemplate = useStore((s) => s.deleteTemplate);
+  const hasTemplateName = useStore((s) => s.hasTemplateName);
 
   const [isAdding, setIsAdding] = useState(false);
   const [newText, setNewText] = useState("");
@@ -37,6 +43,13 @@ export default function AnnotationPanel() {
   );
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editText, setEditText] = useState("");
+  const [templateTab, setTemplateTab] = useState(false);
+  const [isAddingTemplate, setIsAddingTemplate] = useState(false);
+  const [editingTemplateId, setEditingTemplateId] = useState<string | null>(null);
+  const [tplName, setTplName] = useState("");
+  const [tplRisk, setTplRisk] = useState<"safe" | "warning" | "danger">("warning");
+  const [tplText, setTplText] = useState("");
+  const [tplNameError, setTplNameError] = useState("");
 
   const visibleAnnotations = useMemo(() => {
     let filtered = annotations;
@@ -46,6 +59,14 @@ export default function AnnotationPanel() {
     filtered = filtered.filter((a) => riskLevelFilter[a.riskLevel]);
     return filtered.sort((a, b) => b.timestamp - a.timestamp);
   }, [annotations, ignoredRiskIds, showIgnored, riskLevelFilter]);
+
+  const templateMap = useMemo(() => {
+    const map = new Map<string, AnnotationTemplate>();
+    for (const t of templates) {
+      map.set(t.id, t);
+    }
+    return map;
+  }, [templates]);
 
   const handleAdd = useCallback(() => {
     if (!newText.trim()) return;
@@ -72,6 +93,101 @@ export default function AnnotationPanel() {
     },
     [editText, updateAnnotation]
   );
+
+  const handleApplyTemplate = useCallback(
+    (tpl: AnnotationTemplate) => {
+      const hookPos = getHookPosAtTime(job, currentTime);
+      addAnnotation({
+        id: `ann-${Date.now()}`,
+        timestamp: currentTime,
+        position: hookPos,
+        riskLevel: tpl.defaultRiskLevel,
+        text: tpl.defaultText,
+        ignored: false,
+        createdAt: new Date().toISOString(),
+        templateSourceId: tpl.id,
+      });
+    },
+    [currentTime, job, addAnnotation]
+  );
+
+  const resetTemplateForm = useCallback(() => {
+    setTplName("");
+    setTplRisk("warning");
+    setTplText("");
+    setTplNameError("");
+    setIsAddingTemplate(false);
+    setEditingTemplateId(null);
+  }, []);
+
+  const handleAddTemplate = useCallback(() => {
+    if (!tplName.trim()) {
+      setTplNameError("模板名称不能为空");
+      return;
+    }
+    if (hasTemplateName(tplName.trim())) {
+      setTplNameError("模板名称已存在");
+      return;
+    }
+    const tpl: AnnotationTemplate = {
+      id: `tpl-${Date.now()}`,
+      name: tplName.trim(),
+      defaultRiskLevel: tplRisk,
+      defaultText: tplText.trim(),
+      createdAt: new Date().toISOString(),
+    };
+    const ok = addTemplate(tpl);
+    if (!ok) {
+      setTplNameError("模板名称已存在");
+      return;
+    }
+    resetTemplateForm();
+  }, [tplName, tplRisk, tplText, hasTemplateName, addTemplate, resetTemplateForm]);
+
+  const handleEditTemplate = useCallback(
+    (id: string) => {
+      if (!tplName.trim()) {
+        setTplNameError("模板名称不能为空");
+        return;
+      }
+      if (hasTemplateName(tplName.trim(), id)) {
+        setTplNameError("模板名称已存在");
+        return;
+      }
+      const ok = updateTemplate(id, {
+        name: tplName.trim(),
+        defaultRiskLevel: tplRisk,
+        defaultText: tplText.trim(),
+      });
+      if (!ok) {
+        setTplNameError("模板名称已存在");
+        return;
+      }
+      resetTemplateForm();
+    },
+    [tplName, tplRisk, tplText, hasTemplateName, updateTemplate, resetTemplateForm]
+  );
+
+  const startEditTemplate = useCallback(
+    (tpl: AnnotationTemplate) => {
+      setEditingTemplateId(tpl.id);
+      setIsAddingTemplate(false);
+      setTplName(tpl.name);
+      setTplRisk(tpl.defaultRiskLevel);
+      setTplText(tpl.defaultText);
+      setTplNameError("");
+    },
+    []
+  );
+
+  const startAddTemplate = useCallback(() => {
+    setIsAddingTemplate(true);
+    setEditingTemplateId(null);
+    setTplName("");
+    setTplRisk("warning");
+    setTplText("");
+    setTplNameError("");
+  }, []);
 
   const riskBadgeClass = (level: "safe" | "warning" | "danger") => {
     if (level === "danger") return "bg-red-500/20 text-red-400 border-red-500/40";
@@ -139,156 +255,393 @@ export default function AnnotationPanel() {
             </div>
           </div>
 
-          <div className="flex-1 overflow-y-auto p-2 space-y-2">
-            {visibleAnnotations.length === 0 && (
-              <div className="text-center text-xs text-[#3D5A7A] py-4">
-                暂无风险批注
-              </div>
-            )}
-            {visibleAnnotations.map((ann) => (
-              <div
-                key={ann.id}
-                className={`p-2 rounded border transition-colors ${
-                  ann.ignored
-                    ? "bg-[#0A1628] border-[#1E3A5F]/30 opacity-60"
-                    : "bg-[#0A1628] border-[#1E3A5F]/60"
-                }`}
-              >
-                <div className="flex items-center gap-1.5 mb-1">
-                  <span
-                    className={`px-1.5 py-0.5 rounded text-[10px] font-medium border ${riskBadgeClass(ann.riskLevel)}`}
-                  >
-                    {riskLabel(ann.riskLevel)}
-                  </span>
-                  <span className="text-[10px] text-[#3D5A7A] font-mono">
-                    {formatTimestamp(ann.timestamp)}
-                  </span>
-                  <div className="ml-auto flex items-center gap-1">
-                    <button
-                      onClick={() => {
-                        setEditingId(ann.id);
-                        setEditText(ann.text);
-                      }}
-                      className="text-[#5A7A9E] hover:text-white transition-colors"
-                    >
-                      <Edit3 size={11} />
-                    </button>
-                    <button
-                      onClick={() => toggleIgnoreRisk(ann.id)}
-                      className={`transition-colors ${
-                        ann.ignored
-                          ? "text-[#5A7A9E] hover:text-cyan-400"
-                          : "text-[#5A7A9E] hover:text-orange-400"
-                      }`}
-                      title={ann.ignored ? "取消忽略" : "忽略此风险"}
-                    >
-                      {ann.ignored ? (
-                        <ToggleLeft size={13} />
-                      ) : (
-                        <ToggleRight size={13} />
-                      )}
-                    </button>
-                    <button
-                      onClick={() => removeAnnotation(ann.id)}
-                      className="text-[#5A7A9E] hover:text-red-400 transition-colors"
-                    >
-                      <Trash2 size={11} />
-                    </button>
-                  </div>
-                </div>
+          <div className="flex border-b border-[#1E3A5F]/60 flex-shrink-0">
+            <button
+              onClick={() => setTemplateTab(false)}
+              className={`flex-1 px-3 py-1.5 text-xs font-medium transition-colors ${
+                !templateTab
+                  ? "text-cyan-400 border-b-2 border-cyan-400"
+                  : "text-[#5A7A9E] hover:text-white"
+              }`}
+            >
+              批注列表
+            </button>
+            <button
+              onClick={() => setTemplateTab(true)}
+              className={`flex-1 px-3 py-1.5 text-xs font-medium transition-colors ${
+                templateTab
+                  ? "text-cyan-400 border-b-2 border-cyan-400"
+                  : "text-[#5A7A9E] hover:text-white"
+              }`}
+            >
+              <BookTemplate size={12} className="inline mr-1" />
+              复核模板
+            </button>
+          </div>
 
-                {editingId === ann.id ? (
-                  <div className="flex items-center gap-1">
-                    <input
-                      type="text"
-                      value={editText}
-                      onChange={(e) => setEditText(e.target.value)}
-                      onKeyDown={(e) => e.key === "Enter" && handleEdit(ann.id)}
-                      className="flex-1 bg-[#162844] border border-[#1E3A5F]/60 rounded px-1.5 py-0.5 text-xs text-white outline-none"
-                    />
+          {templateTab ? (
+            <div className="flex-1 overflow-y-auto">
+              <div className="p-2 space-y-2">
+                {templates.length === 0 && !isAddingTemplate && !editingTemplateId && (
+                  <div className="text-center py-6">
+                    <BookTemplate size={28} className="mx-auto mb-2 text-[#3D5A7A]" />
+                    <div className="text-xs text-[#5A7A9E] mb-3">
+                      暂无复核模板
+                    </div>
+                    <div className="text-[10px] text-[#3D5A7A] mb-3">
+                      创建常用复核项模板，一键落成风险批注
+                    </div>
                     <button
-                      onClick={() => handleEdit(ann.id)}
-                      className="text-green-400"
+                      onClick={startAddTemplate}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded bg-cyan-600/80 hover:bg-cyan-500 text-white text-xs transition-colors"
                     >
-                      <Check size={12} />
-                    </button>
-                    <button
-                      onClick={() => setEditingId(null)}
-                      className="text-red-400"
-                    >
-                      <X size={12} />
+                      <Plus size={12} />
+                      新建模板
                     </button>
                   </div>
-                ) : (
-                  <p className="text-xs text-[#8BA4C7] leading-relaxed">
-                    {ann.ignored && (
-                      <span className="text-[#3D5A7A] line-through mr-1">
-                        已忽略:
-                      </span>
+                )}
+
+                {templates.map((tpl) => (
+                  <div
+                    key={tpl.id}
+                    className="p-2 rounded border bg-[#0A1628] border-[#1E3A5F]/60"
+                  >
+                    {editingTemplateId === tpl.id ? (
+                      <div className="space-y-1.5">
+                        <div>
+                          <input
+                            type="text"
+                            value={tplName}
+                            onChange={(e) => {
+                              setTplName(e.target.value);
+                              setTplNameError("");
+                            }}
+                            placeholder="模板名称"
+                            className={`w-full bg-[#162844] border rounded px-1.5 py-0.5 text-xs text-white outline-none ${
+                              tplNameError ? "border-red-500/60" : "border-[#1E3A5F]/60"
+                            }`}
+                            autoFocus
+                          />
+                          {tplNameError && (
+                            <div className="text-[10px] text-red-400 mt-0.5">{tplNameError}</div>
+                          )}
+                        </div>
+                        <div className="flex items-center gap-1">
+                          {(["warning", "danger", "safe"] as const).map((level) => (
+                            <button
+                              key={level}
+                              onClick={() => setTplRisk(level)}
+                              className={`px-2 py-0.5 rounded text-[10px] font-medium border transition-colors ${
+                                tplRisk === level
+                                  ? riskBadgeClass(level)
+                                  : "bg-transparent border-[#1E3A5F]/40 text-[#3D5A7A]"
+                              }`}
+                            >
+                              {riskLabel(level)}
+                            </button>
+                          ))}
+                        </div>
+                        <input
+                          type="text"
+                          value={tplText}
+                          onChange={(e) => setTplText(e.target.value)}
+                          placeholder="默认批注文本"
+                          className="w-full bg-[#162844] border border-[#1E3A5F]/60 rounded px-1.5 py-0.5 text-xs text-white outline-none"
+                        />
+                        <div className="flex items-center gap-1">
+                          <button
+                            onClick={() => handleEditTemplate(tpl.id)}
+                            className="text-green-400"
+                          >
+                            <Check size={12} />
+                          </button>
+                          <button
+                            onClick={resetTemplateForm}
+                            className="text-red-400"
+                          >
+                            <X size={12} />
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <>
+                        <div className="flex items-center gap-1.5 mb-1">
+                          <span
+                            className={`px-1.5 py-0.5 rounded text-[10px] font-medium border ${riskBadgeClass(tpl.defaultRiskLevel)}`}
+                          >
+                            {riskLabel(tpl.defaultRiskLevel)}
+                          </span>
+                          <span className="text-xs text-white font-medium truncate flex-1">
+                            {tpl.name}
+                          </span>
+                          <div className="flex items-center gap-1">
+                            <button
+                              onClick={() => handleApplyTemplate(tpl)}
+                              className="text-cyan-400 hover:text-cyan-300 transition-colors"
+                              title="套用此模板"
+                            >
+                              <Copy size={12} />
+                            </button>
+                            <button
+                              onClick={() => startEditTemplate(tpl)}
+                              className="text-[#5A7A9E] hover:text-white transition-colors"
+                            >
+                              <Edit3 size={11} />
+                            </button>
+                            <button
+                              onClick={() => deleteTemplate(tpl.id)}
+                              className="text-[#5A7A9E] hover:text-red-400 transition-colors"
+                            >
+                              <Trash2 size={11} />
+                            </button>
+                          </div>
+                        </div>
+                        {tpl.defaultText && (
+                          <p className="text-[10px] text-[#8BA4C7] leading-relaxed truncate">
+                            {tpl.defaultText}
+                          </p>
+                        )}
+                      </>
                     )}
-                    {ann.text}
-                  </p>
+                  </div>
+                ))}
+
+                {(isAddingTemplate || (templates.length > 0 && editingTemplateId === null && !isAddingTemplate)) && (
+                  <div className="p-2 rounded border border-dashed border-[#1E3A5F]/60 bg-[#0A1628]/50">
+                    {isAddingTemplate ? (
+                      <div className="space-y-1.5">
+                        <div>
+                          <input
+                            type="text"
+                            value={tplName}
+                            onChange={(e) => {
+                              setTplName(e.target.value);
+                              setTplNameError("");
+                            }}
+                            placeholder="模板名称"
+                            className={`w-full bg-[#162844] border rounded px-1.5 py-0.5 text-xs text-white outline-none ${
+                              tplNameError ? "border-red-500/60" : "border-[#1E3A5F]/60"
+                            }`}
+                            autoFocus
+                          />
+                          {tplNameError && (
+                            <div className="text-[10px] text-red-400 mt-0.5">{tplNameError}</div>
+                          )}
+                        </div>
+                        <div className="flex items-center gap-1">
+                          {(["warning", "danger", "safe"] as const).map((level) => (
+                            <button
+                              key={level}
+                              onClick={() => setTplRisk(level)}
+                              className={`px-2 py-0.5 rounded text-[10px] font-medium border transition-colors ${
+                                tplRisk === level
+                                  ? riskBadgeClass(level)
+                                  : "bg-transparent border-[#1E3A5F]/40 text-[#3D5A7A]"
+                              }`}
+                            >
+                              {riskLabel(level)}
+                            </button>
+                          ))}
+                        </div>
+                        <input
+                          type="text"
+                          value={tplText}
+                          onChange={(e) => setTplText(e.target.value)}
+                          placeholder="默认批注文本"
+                          className="w-full bg-[#162844] border border-[#1E3A5F]/60 rounded px-1.5 py-0.5 text-xs text-white outline-none"
+                        />
+                        <div className="flex items-center gap-1">
+                          <button
+                            onClick={handleAddTemplate}
+                            className="text-green-400"
+                          >
+                            <Check size={12} />
+                          </button>
+                          <button
+                            onClick={resetTemplateForm}
+                            className="text-red-400"
+                          >
+                            <X size={12} />
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <button
+                        onClick={startAddTemplate}
+                        className="w-full flex items-center justify-center gap-1.5 py-1 text-[#5A7A9E] hover:text-white transition-colors text-xs"
+                      >
+                        <Plus size={12} />
+                        新建模板
+                      </button>
+                    )}
+                  </div>
                 )}
               </div>
-            ))}
-          </div>
+            </div>
+          ) : (
+            <>
+              <div className="flex-1 overflow-y-auto p-2 space-y-2">
+                {visibleAnnotations.length === 0 && (
+                  <div className="text-center text-xs text-[#3D5A7A] py-4">
+                    暂无风险批注
+                  </div>
+                )}
+                {visibleAnnotations.map((ann) => (
+                  <div
+                    key={ann.id}
+                    className={`p-2 rounded border transition-colors ${
+                      ann.ignored
+                        ? "bg-[#0A1628] border-[#1E3A5F]/30 opacity-60"
+                        : "bg-[#0A1628] border-[#1E3A5F]/60"
+                    }`}
+                  >
+                    <div className="flex items-center gap-1.5 mb-1">
+                      <span
+                        className={`px-1.5 py-0.5 rounded text-[10px] font-medium border ${riskBadgeClass(ann.riskLevel)}`}
+                      >
+                        {riskLabel(ann.riskLevel)}
+                      </span>
+                      <span className="text-[10px] text-[#3D5A7A] font-mono">
+                        {formatTimestamp(ann.timestamp)}
+                      </span>
+                      {ann.templateSourceId && templateMap.has(ann.templateSourceId) && (
+                        <span className="text-[9px] px-1 py-0.5 rounded bg-cyan-500/10 text-cyan-400 border border-cyan-500/20">
+                          模板: {templateMap.get(ann.templateSourceId)!.name}
+                        </span>
+                      )}
+                      {ann.templateSourceId && !templateMap.has(ann.templateSourceId) && (
+                        <span className="text-[9px] px-1 py-0.5 rounded bg-[#1E3A5F]/40 text-[#5A7A9E] border border-[#1E3A5F]/30">
+                          模板已删
+                        </span>
+                      )}
+                      <div className="ml-auto flex items-center gap-1">
+                        <button
+                          onClick={() => {
+                            setEditingId(ann.id);
+                            setEditText(ann.text);
+                          }}
+                          className="text-[#5A7A9E] hover:text-white transition-colors"
+                        >
+                          <Edit3 size={11} />
+                        </button>
+                        <button
+                          onClick={() => toggleIgnoreRisk(ann.id)}
+                          className={`transition-colors ${
+                            ann.ignored
+                              ? "text-[#5A7A9E] hover:text-cyan-400"
+                              : "text-[#5A7A9E] hover:text-orange-400"
+                          }`}
+                          title={ann.ignored ? "取消忽略" : "忽略此风险"}
+                        >
+                          {ann.ignored ? (
+                            <ToggleLeft size={13} />
+                          ) : (
+                            <ToggleRight size={13} />
+                          )}
+                        </button>
+                        <button
+                          onClick={() => removeAnnotation(ann.id)}
+                          className="text-[#5A7A9E] hover:text-red-400 transition-colors"
+                        >
+                          <Trash2 size={11} />
+                        </button>
+                      </div>
+                    </div>
 
-          <div className="p-2 border-t border-[#1E3A5F]/60 flex-shrink-0">
-            {isAdding ? (
-              <div className="space-y-2">
-                <div className="flex items-center gap-1.5">
-                  {(["warning", "danger", "safe"] as const).map((level) => (
-                    <button
-                      key={level}
-                      onClick={() => setNewRisk(level)}
-                      className={`px-2 py-0.5 rounded text-[10px] font-medium border transition-colors ${
-                        newRisk === level
-                          ? riskBadgeClass(level)
-                          : "bg-transparent border-[#1E3A5F]/40 text-[#3D5A7A]"
-                      }`}
-                    >
-                      {riskLabel(level)}
-                    </button>
-                  ))}
-                </div>
-                <div className="flex items-center gap-1">
-                  <input
-                    type="text"
-                    value={newText}
-                    onChange={(e) => setNewText(e.target.value)}
-                    onKeyDown={(e) => e.key === "Enter" && handleAdd()}
-                    placeholder="输入批注内容..."
-                    className="flex-1 bg-[#0A1628] border border-[#1E3A5F]/60 rounded px-2 py-1.5 text-xs text-white placeholder-[#3D5A7A] outline-none focus:border-cyan-500/50"
-                    autoFocus
-                  />
-                  <button
-                    onClick={handleAdd}
-                    disabled={!newText.trim()}
-                    className="text-cyan-400 disabled:opacity-30"
-                  >
-                    <Check size={14} />
-                  </button>
-                  <button
-                    onClick={() => {
-                      setIsAdding(false);
-                      setNewText("");
-                    }}
-                    className="text-[#5A7A9E]"
-                  >
-                    <X size={14} />
-                  </button>
-                </div>
+                    {editingId === ann.id ? (
+                      <div className="flex items-center gap-1">
+                        <input
+                          type="text"
+                          value={editText}
+                          onChange={(e) => setEditText(e.target.value)}
+                          onKeyDown={(e) => e.key === "Enter" && handleEdit(ann.id)}
+                          className="flex-1 bg-[#162844] border border-[#1E3A5F]/60 rounded px-1.5 py-0.5 text-xs text-white outline-none"
+                        />
+                        <button
+                          onClick={() => handleEdit(ann.id)}
+                          className="text-green-400"
+                        >
+                          <Check size={12} />
+                        </button>
+                        <button
+                          onClick={() => setEditingId(null)}
+                          className="text-red-400"
+                        >
+                          <X size={12} />
+                        </button>
+                      </div>
+                    ) : (
+                      <p className="text-xs text-[#8BA4C7] leading-relaxed">
+                        {ann.ignored && (
+                          <span className="text-[#3D5A7A] line-through mr-1">
+                            已忽略:
+                          </span>
+                        )}
+                        {ann.text}
+                      </p>
+                    )}
+                  </div>
+                ))}
               </div>
-            ) : (
-              <button
-                onClick={() => setIsAdding(true)}
-                className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded bg-[#162844] text-[#5A7A9E] hover:text-white hover:bg-[#1E3A5F] transition-colors text-xs"
-              >
-                <Plus size={14} />
-                添加批注
-              </button>
-            )}
-          </div>
+
+              <div className="p-2 border-t border-[#1E3A5F]/60 flex-shrink-0">
+                {isAdding ? (
+                  <div className="space-y-2">
+                    <div className="flex items-center gap-1.5">
+                      {(["warning", "danger", "safe"] as const).map((level) => (
+                        <button
+                          key={level}
+                          onClick={() => setNewRisk(level)}
+                          className={`px-2 py-0.5 rounded text-[10px] font-medium border transition-colors ${
+                            newRisk === level
+                              ? riskBadgeClass(level)
+                              : "bg-transparent border-[#1E3A5F]/40 text-[#3D5A7A]"
+                          }`}
+                        >
+                          {riskLabel(level)}
+                        </button>
+                      ))}
+                    </div>
+                    <div className="flex items-center gap-1">
+                      <input
+                        type="text"
+                        value={newText}
+                        onChange={(e) => setNewText(e.target.value)}
+                        onKeyDown={(e) => e.key === "Enter" && handleAdd()}
+                        placeholder="输入批注内容..."
+                        className="flex-1 bg-[#0A1628] border border-[#1E3A5F]/60 rounded px-2 py-1.5 text-xs text-white placeholder-[#3D5A7A] outline-none focus:border-cyan-500/50"
+                        autoFocus
+                      />
+                      <button
+                        onClick={handleAdd}
+                        disabled={!newText.trim()}
+                        className="text-cyan-400 disabled:opacity-30"
+                      >
+                        <Check size={14} />
+                      </button>
+                      <button
+                        onClick={() => {
+                          setIsAdding(false);
+                          setNewText("");
+                        }}
+                        className="text-[#5A7A9E]"
+                      >
+                        <X size={14} />
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <button
+                    onClick={() => setIsAdding(true)}
+                    className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded bg-[#162844] text-[#5A7A9E] hover:text-white hover:bg-[#1E3A5F] transition-colors text-xs"
+                  >
+                    <Plus size={14} />
+                    添加批注
+                  </button>
+                )}
+              </div>
+            </>
+          )}
         </div>
       )}
     </div>

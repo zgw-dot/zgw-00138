@@ -18,6 +18,7 @@ import type {
   ValidationError,
   RiskLevelFilter,
   ExportSnapshot,
+  AnnotationTemplate as TplType,
 } from "@/types";
 
 function makeValidJob(overrides?: Partial<LiftingJob>): LiftingJob {
@@ -1419,5 +1420,575 @@ describe("regression - doc-vs-implementation consistency", () => {
     expect(typeof parsed.exportOptions.includeIgnored).toBe("boolean");
     expect(parsed.exportOptions.riskLevelFilter).toBeDefined();
     expect(typeof parsed.exportOptions.exportedCount).toBe("number");
+  });
+});
+
+describe("template - CRUD and persistence", () => {
+  const baseJob = makeValidJob();
+  const defaultCamera = {
+    position: [0, 80, 0.1] as [number, number, number],
+    target: [0, 0, 0] as [number, number, number],
+  };
+  const allLevels: RiskLevelFilter = { safe: true, warning: true, danger: true };
+
+  beforeEach(async () => {
+    const { useStore } = await import("@/store/useStore");
+    useStore.setState({
+      job: null,
+      currentTime: 0,
+      annotations: [],
+      ignoredRiskIds: [],
+      showIgnored: true,
+      riskLevelFilter: allLevels,
+      camera: defaultCamera,
+      snapshots: {},
+      currentSnapshotId: null,
+      currentJobId: null,
+      snapshotHistory: [],
+      cameraPresets: [],
+      lastImportSuccess: null,
+      lastImportFailure: null,
+      templates: [],
+    });
+  });
+
+  it("addTemplate succeeds with unique name", async () => {
+    const { useStore } = await import("@/store/useStore");
+    const store = useStore;
+    const tpl: TplType = {
+      id: "tpl-1",
+      name: "越界作业",
+      defaultRiskLevel: "danger",
+      defaultText: "吊臂越界进入限制区",
+      createdAt: new Date().toISOString(),
+    };
+    const ok = store.getState().addTemplate(tpl);
+    expect(ok).toBe(true);
+    expect(store.getState().templates).toHaveLength(1);
+    expect(store.getState().templates[0].name).toBe("越界作业");
+  });
+
+  it("addTemplate rejects duplicate name", async () => {
+    const { useStore } = await import("@/store/useStore");
+    const store = useStore;
+    const tpl1: TplType = {
+      id: "tpl-1",
+      name: "越界作业",
+      defaultRiskLevel: "danger",
+      defaultText: "吊臂越界",
+      createdAt: new Date().toISOString(),
+    };
+    store.getState().addTemplate(tpl1);
+    const tpl2: TplType = {
+      id: "tpl-2",
+      name: "越界作业",
+      defaultRiskLevel: "warning",
+      defaultText: "另一条",
+      createdAt: new Date().toISOString(),
+    };
+    const ok = store.getState().addTemplate(tpl2);
+    expect(ok).toBe(false);
+    expect(store.getState().templates).toHaveLength(1);
+  });
+
+  it("updateTemplate rejects duplicate name from other template", async () => {
+    const { useStore } = await import("@/store/useStore");
+    const store = useStore;
+    const tpl1: TplType = {
+      id: "tpl-1",
+      name: "越界作业",
+      defaultRiskLevel: "danger",
+      defaultText: "a",
+      createdAt: new Date().toISOString(),
+    };
+    const tpl2: TplType = {
+      id: "tpl-2",
+      name: "超载",
+      defaultRiskLevel: "warning",
+      defaultText: "b",
+      createdAt: new Date().toISOString(),
+    };
+    store.getState().addTemplate(tpl1);
+    store.getState().addTemplate(tpl2);
+    const ok = store.getState().updateTemplate("tpl-2", { name: "越界作业" });
+    expect(ok).toBe(false);
+    expect(store.getState().templates[1].name).toBe("超载");
+  });
+
+  it("updateTemplate allows keeping same name", async () => {
+    const { useStore } = await import("@/store/useStore");
+    const store = useStore;
+    const tpl1: TplType = {
+      id: "tpl-1",
+      name: "越界作业",
+      defaultRiskLevel: "danger",
+      defaultText: "a",
+      createdAt: new Date().toISOString(),
+    };
+    store.getState().addTemplate(tpl1);
+    const ok = store.getState().updateTemplate("tpl-1", { name: "越界作业", defaultText: "修改后" });
+    expect(ok).toBe(true);
+    expect(store.getState().templates[0].defaultText).toBe("修改后");
+  });
+
+  it("deleteTemplate removes template but not annotations created from it", async () => {
+    const { useStore } = await import("@/store/useStore");
+    const store = useStore;
+    const tpl: TplType = {
+      id: "tpl-1",
+      name: "越界作业",
+      defaultRiskLevel: "danger",
+      defaultText: "吊臂越界",
+      createdAt: new Date().toISOString(),
+    };
+    store.getState().addTemplate(tpl);
+    store.getState().importJob(baseJob);
+    store.getState().addAnnotation({
+      id: "ann-from-tpl",
+      timestamp: 1000,
+      position: [0, 0, 0],
+      riskLevel: "danger",
+      text: "吊臂越界",
+      ignored: false,
+      createdAt: new Date().toISOString(),
+      templateSourceId: "tpl-1",
+    });
+    store.getState().addAnnotation({
+      id: "ann-manual",
+      timestamp: 2000,
+      position: [0, 0, 0],
+      riskLevel: "warning",
+      text: "手动批注",
+      ignored: false,
+      createdAt: new Date().toISOString(),
+    });
+    expect(store.getState().annotations).toHaveLength(2);
+    store.getState().deleteTemplate("tpl-1");
+    expect(store.getState().templates).toHaveLength(0);
+    expect(store.getState().annotations).toHaveLength(2);
+    expect(store.getState().annotations.find((a) => a.id === "ann-from-tpl")).toBeDefined();
+    expect(store.getState().annotations.find((a) => a.id === "ann-from-tpl")!.templateSourceId).toBe("tpl-1");
+  });
+
+  it("hasTemplateName works correctly", async () => {
+    const { useStore } = await import("@/store/useStore");
+    const store = useStore;
+    const tpl: TplType = {
+      id: "tpl-1",
+      name: "越界作业",
+      defaultRiskLevel: "danger",
+      defaultText: "a",
+      createdAt: new Date().toISOString(),
+    };
+    store.getState().addTemplate(tpl);
+    expect(store.getState().hasTemplateName("越界作业")).toBe(true);
+    expect(store.getState().hasTemplateName("超载")).toBe(false);
+    expect(store.getState().hasTemplateName("越界作业", "tpl-1")).toBe(false);
+    expect(store.getState().hasTemplateName("越界作业", "tpl-other")).toBe(true);
+  });
+
+  it("templates persist across job import (are tool-level, not job-level)", async () => {
+    const { useStore } = await import("@/store/useStore");
+    const store = useStore;
+    const tpl: TplType = {
+      id: "tpl-1",
+      name: "越界作业",
+      defaultRiskLevel: "danger",
+      defaultText: "吊臂越界",
+      createdAt: new Date().toISOString(),
+    };
+    store.getState().addTemplate(tpl);
+    store.getState().importJob(baseJob);
+    expect(store.getState().templates).toHaveLength(1);
+    expect(store.getState().templates[0].name).toBe("越界作业");
+  });
+
+  it("templates are included in persist partialize", async () => {
+    const { useStore } = await import("@/store/useStore");
+    const store = useStore;
+    const tpl: TplType = {
+      id: "tpl-persist",
+      name: "持久化模板",
+      defaultRiskLevel: "warning",
+      defaultText: "测试",
+      createdAt: new Date().toISOString(),
+    };
+    store.getState().addTemplate(tpl);
+    const persistConfig = (store as any).persist?.options;
+    if (persistConfig?.partialize) {
+      const partialized = persistConfig.partialize(store.getState());
+      expect(partialized.templates).toBeDefined();
+      expect(partialized.templates).toHaveLength(1);
+      expect(partialized.templates[0].name).toBe("持久化模板");
+    }
+  });
+});
+
+describe("template - cross-job reuse", () => {
+  const baseJob = makeValidJob();
+  const anotherJob = makeValidJob({
+    meta: { name: "另一个作业", date: "2025-03-01", craneId: "CR-003", craneType: "汽车起重机", siteName: "其他工地" },
+  } as Partial<LiftingJob>);
+  const defaultCamera = {
+    position: [0, 80, 0.1] as [number, number, number],
+    target: [0, 0, 0] as [number, number, number],
+  };
+  const allLevels: RiskLevelFilter = { safe: true, warning: true, danger: true };
+
+  beforeEach(async () => {
+    const { useStore } = await import("@/store/useStore");
+    useStore.setState({
+      job: null,
+      currentTime: 0,
+      annotations: [],
+      ignoredRiskIds: [],
+      showIgnored: true,
+      riskLevelFilter: allLevels,
+      camera: defaultCamera,
+      snapshots: {},
+      currentSnapshotId: null,
+      currentJobId: null,
+      snapshotHistory: [],
+      cameraPresets: [],
+      lastImportSuccess: null,
+      lastImportFailure: null,
+      templates: [],
+    });
+  });
+
+  it("template survives job switch and can be used on new job", async () => {
+    const { useStore } = await import("@/store/useStore");
+    const store = useStore;
+    const tpl: TplType = {
+      id: "tpl-1",
+      name: "通用复核项",
+      defaultRiskLevel: "warning",
+      defaultText: "需二次确认",
+      createdAt: new Date().toISOString(),
+    };
+    store.getState().addTemplate(tpl);
+    store.getState().importJob(baseJob);
+    store.getState().addAnnotation({
+      id: "ann-1",
+      timestamp: 1000,
+      position: [0, 0, 0],
+      riskLevel: "warning",
+      text: "需二次确认",
+      ignored: false,
+      createdAt: new Date().toISOString(),
+      templateSourceId: "tpl-1",
+    });
+    expect(store.getState().annotations).toHaveLength(1);
+
+    store.getState().importJob(anotherJob);
+    expect(store.getState().templates).toHaveLength(1);
+    expect(store.getState().annotations).toHaveLength(0);
+
+    store.getState().addAnnotation({
+      id: "ann-2",
+      timestamp: 2000,
+      position: [0, 0, 0],
+      riskLevel: "warning",
+      text: "需二次确认",
+      ignored: false,
+      createdAt: new Date().toISOString(),
+      templateSourceId: "tpl-1",
+    });
+    expect(store.getState().annotations).toHaveLength(1);
+    expect(store.getState().annotations[0].templateSourceId).toBe("tpl-1");
+  });
+});
+
+describe("template - export consistency with templateSourceId", () => {
+  const baseJob = makeValidJob();
+  const defaultCamera = {
+    position: [0, 80, 0.1] as [number, number, number],
+    target: [0, 0, 0] as [number, number, number],
+  };
+  const allLevels: RiskLevelFilter = { safe: true, warning: true, danger: true };
+
+  it("JSON export includes templateSourceId and templateName", () => {
+    const tpl: TplType = {
+      id: "tpl-export",
+      name: "越界检测",
+      defaultRiskLevel: "danger",
+      defaultText: "吊臂越界",
+      createdAt: new Date().toISOString(),
+    };
+    const annotations: Annotation[] = [
+      {
+        id: "ann-tpl",
+        timestamp: 1000,
+        position: [0, 0, 0],
+        riskLevel: "danger",
+        text: "吊臂越界",
+        ignored: false,
+        createdAt: new Date().toISOString(),
+        templateSourceId: "tpl-export",
+      },
+      {
+        id: "ann-manual",
+        timestamp: 2000,
+        position: [0, 0, 0],
+        riskLevel: "warning",
+        text: "手动批注",
+        ignored: false,
+        createdAt: new Date().toISOString(),
+      },
+    ];
+    const json = exportToJSON(baseJob, annotations, [], true, [tpl]);
+    const parsed = JSON.parse(json);
+    expect(parsed.annotations).toHaveLength(2);
+    const tplAnn = parsed.annotations.find((a: any) => a.id === "ann-tpl");
+    expect(tplAnn.templateSourceId).toBe("tpl-export");
+    expect(tplAnn.templateName).toBe("越界检测");
+    const manualAnn = parsed.annotations.find((a: any) => a.id === "ann-manual");
+    expect(manualAnn.templateSourceId).toBeNull();
+    expect(manualAnn.templateName).toBeNull();
+  });
+
+  it("JSON export shows null templateName when template is deleted", () => {
+    const annotations: Annotation[] = [
+      {
+        id: "ann-tpl",
+        timestamp: 1000,
+        position: [0, 0, 0],
+        riskLevel: "danger",
+        text: "吊臂越界",
+        ignored: false,
+        createdAt: new Date().toISOString(),
+        templateSourceId: "tpl-deleted",
+      },
+    ];
+    const json = exportToJSON(baseJob, annotations, [], true, []);
+    const parsed = JSON.parse(json);
+    expect(parsed.annotations[0].templateSourceId).toBe("tpl-deleted");
+    expect(parsed.annotations[0].templateName).toBeNull();
+  });
+
+  it("CSV export includes template source columns", () => {
+    const tpl: TplType = {
+      id: "tpl-csv",
+      name: "CSV越界",
+      defaultRiskLevel: "danger",
+      defaultText: "csv测试",
+      createdAt: new Date().toISOString(),
+    };
+    const annotations: Annotation[] = [
+      {
+        id: "ann-csv-tpl",
+        timestamp: 1000,
+        position: [0, 0, 0],
+        riskLevel: "danger",
+        text: "csv测试",
+        ignored: false,
+        createdAt: new Date().toISOString(),
+        templateSourceId: "tpl-csv",
+      },
+    ];
+    const csv = exportToCSV(baseJob, annotations, [], true, [tpl]);
+    const headerLine = csv.split("\n").find((l) => l.includes("模板来源ID"));
+    expect(headerLine).toBeDefined();
+    expect(headerLine).toContain("模板名称");
+    const dataLine = csv.split("\n").find((l) => l.startsWith("ann-csv-tpl"));
+    expect(dataLine).toBeDefined();
+    expect(dataLine).toContain("tpl-csv");
+    expect(dataLine).toContain("CSV越界");
+  });
+
+  it("snapshot JSON export includes templateSourceId and templateName", () => {
+    const tpl: TplType = {
+      id: "tpl-snap",
+      name: "快照模板",
+      defaultRiskLevel: "warning",
+      defaultText: "快照测试",
+      createdAt: new Date().toISOString(),
+    };
+    const annotations: Annotation[] = [
+      {
+        id: "ann-snap-tpl",
+        timestamp: 1000,
+        position: [0, 0, 0],
+        riskLevel: "warning",
+        text: "快照测试",
+        ignored: false,
+        createdAt: new Date().toISOString(),
+        templateSourceId: "tpl-snap",
+      },
+    ];
+    const snapshot = createSnapshot(
+      baseJob, annotations, 1000, defaultCamera, true, allLevels, [], "模板快照"
+    );
+    const json = exportToJSONFromSnapshot(snapshot, [tpl]);
+    const parsed = JSON.parse(json);
+    expect(parsed.annotations[0].templateSourceId).toBe("tpl-snap");
+    expect(parsed.annotations[0].templateName).toBe("快照模板");
+  });
+
+  it("snapshot CSV export includes template source columns", () => {
+    const tpl: TplType = {
+      id: "tpl-snap-csv",
+      name: "CSV快照模板",
+      defaultRiskLevel: "danger",
+      defaultText: "csv快照",
+      createdAt: new Date().toISOString(),
+    };
+    const annotations: Annotation[] = [
+      {
+        id: "ann-snap-csv",
+        timestamp: 1000,
+        position: [0, 0, 0],
+        riskLevel: "danger",
+        text: "csv快照",
+        ignored: false,
+        createdAt: new Date().toISOString(),
+        templateSourceId: "tpl-snap-csv",
+      },
+    ];
+    const snapshot = createSnapshot(
+      baseJob, annotations, 1000, defaultCamera, true, allLevels, [], "CSV快照"
+    );
+    const csv = exportToCSVFromSnapshot(snapshot, [tpl]);
+    const headerLine = csv.split("\n").find((l) => l.includes("模板来源ID"));
+    expect(headerLine).toBeDefined();
+    const dataLine = csv.split("\n").find((l) => l.startsWith("ann-snap-csv"));
+    expect(dataLine).toContain("tpl-snap-csv");
+    expect(dataLine).toContain("CSV快照模板");
+  });
+
+  it("template source is preserved after snapshot update and undo", async () => {
+    const { useStore } = await import("@/store/useStore");
+    const store = useStore;
+    const tpl: TplType = {
+      id: "tpl-undo",
+      name: "撤销测试模板",
+      defaultRiskLevel: "danger",
+      defaultText: "撤销测试",
+      createdAt: new Date().toISOString(),
+    };
+    store.getState().addTemplate(tpl);
+    store.getState().importJob(baseJob);
+    store.getState().addAnnotation({
+      id: "ann-undo-1",
+      timestamp: 1000,
+      position: [0, 0, 0],
+      riskLevel: "danger",
+      text: "撤销测试",
+      ignored: false,
+      createdAt: new Date().toISOString(),
+      templateSourceId: "tpl-undo",
+    });
+    const snapshot = store.getState().createExportSnapshot("撤销测试快照");
+    store.getState().saveSnapshot(snapshot);
+
+    const jsonV1 = exportToJSONFromSnapshot(store.getState().getCurrentSnapshot()!, [tpl]);
+    const parsedV1 = JSON.parse(jsonV1);
+    expect(parsedV1.annotations[0].templateSourceId).toBe("tpl-undo");
+    expect(parsedV1.annotations[0].templateName).toBe("撤销测试模板");
+
+    store.getState().addAnnotation({
+      id: "ann-undo-2",
+      timestamp: 2000,
+      position: [0, 0, 0],
+      riskLevel: "warning",
+      text: "新批注",
+      ignored: false,
+      createdAt: new Date().toISOString(),
+    });
+    store.getState().updateCurrentSnapshot();
+
+    store.getState().undoLastSnapshotChange();
+    const restored = store.getState().getCurrentSnapshot()!;
+    const jsonRestored = exportToJSONFromSnapshot(restored, [tpl]);
+    const parsedRestored = JSON.parse(jsonRestored);
+    expect(parsedRestored.annotations[0].templateSourceId).toBe("tpl-undo");
+    expect(parsedRestored.annotations[0].templateName).toBe("撤销测试模板");
+  });
+
+  it("deleting template after snapshot preserves templateSourceId in snapshot data", async () => {
+    const { useStore } = await import("@/store/useStore");
+    const store = useStore;
+    const tpl: TplType = {
+      id: "tpl-del-after",
+      name: "删除后测试",
+      defaultRiskLevel: "danger",
+      defaultText: "删除后",
+      createdAt: new Date().toISOString(),
+    };
+    store.getState().addTemplate(tpl);
+    store.getState().importJob(baseJob);
+    store.getState().addAnnotation({
+      id: "ann-del-after",
+      timestamp: 1000,
+      position: [0, 0, 0],
+      riskLevel: "danger",
+      text: "删除后",
+      ignored: false,
+      createdAt: new Date().toISOString(),
+      templateSourceId: "tpl-del-after",
+    });
+    const snapshot = store.getState().createExportSnapshot("删除模板后快照");
+    store.getState().saveSnapshot(snapshot);
+
+    store.getState().deleteTemplate("tpl-del-after");
+
+    const jsonAfterDelete = exportToJSONFromSnapshot(
+      store.getState().getCurrentSnapshot()!, []
+    );
+    const parsedAfter = JSON.parse(jsonAfterDelete);
+    expect(parsedAfter.annotations[0].templateSourceId).toBe("tpl-del-after");
+    expect(parsedAfter.annotations[0].templateName).toBeNull();
+
+    const jsonBeforeDelete = exportToJSONFromSnapshot(
+      store.getState().getCurrentSnapshot()!, [tpl]
+    );
+    const parsedBefore = JSON.parse(jsonBeforeDelete);
+    expect(parsedBefore.annotations[0].templateSourceId).toBe("tpl-del-after");
+    expect(parsedBefore.annotations[0].templateName).toBe("删除后测试");
+  });
+});
+
+describe("template - filter consistency", () => {
+  const baseJob = makeValidJob();
+
+  it("template-applied annotations respect current filter in visible list", async () => {
+    const { useStore } = await import("@/store/useStore");
+    const store = useStore;
+    const tpl: TplType = {
+      id: "tpl-filter",
+      name: "筛选测试",
+      defaultRiskLevel: "danger",
+      defaultText: "筛选测试",
+      createdAt: new Date().toISOString(),
+    };
+    store.getState().addTemplate(tpl);
+    store.getState().importJob(baseJob);
+
+    store.getState().addAnnotation({
+      id: "ann-filter-1",
+      timestamp: 1000,
+      position: [0, 0, 0],
+      riskLevel: "danger",
+      text: "筛选测试",
+      ignored: false,
+      createdAt: new Date().toISOString(),
+      templateSourceId: "tpl-filter",
+    });
+
+    store.getState().setRiskLevelFilter({ danger: false });
+    const snapshot = store.getState().createExportSnapshot("筛选快照");
+    store.getState().saveSnapshot(snapshot);
+    expect(snapshot.annotations).toHaveLength(0);
+    expect(snapshot.riskStats.visible).toBe(0);
+    expect(snapshot.riskStats.total).toBe(1);
+
+    const json = exportToJSONFromSnapshot(snapshot, [tpl]);
+    const parsed = JSON.parse(json);
+    expect(parsed.annotations).toHaveLength(0);
+    expect(parsed.riskStats.exported).toBe(0);
+
+    const csv = exportToCSVFromSnapshot(snapshot, [tpl]);
+    const annRows = csv.split("\n").filter((l) => l.startsWith("ann-"));
+    expect(annRows).toHaveLength(0);
   });
 });

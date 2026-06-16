@@ -1,6 +1,7 @@
 import type {
   LiftingJob,
   Annotation,
+  AnnotationTemplate,
   ExportSnapshot,
   RiskLevelFilter,
   CameraState,
@@ -187,7 +188,8 @@ export function exportToJSON(
   job: LiftingJob,
   annotations: Annotation[],
   ignoredRiskIds: string[],
-  showIgnored: boolean
+  showIgnored: boolean,
+  templates: AnnotationTemplate[] = []
 ): string {
   const visibleAnnotations = getVisibleAnnotations(
     annotations,
@@ -195,6 +197,8 @@ export function exportToJSON(
     showIgnored
   );
   const stats = computeRiskStats(annotations, ignoredRiskIds, showIgnored);
+  const tplMap = new Map<string, AnnotationTemplate>();
+  for (const t of templates) tplMap.set(t.id, t);
 
   const report = {
     meta: job.meta,
@@ -209,6 +213,10 @@ export function exportToJSON(
       text: a.text,
       ignored: a.ignored,
       createdAt: a.createdAt,
+      templateSourceId: a.templateSourceId || null,
+      templateName: a.templateSourceId && tplMap.has(a.templateSourceId)
+        ? tplMap.get(a.templateSourceId)!.name
+        : null,
     })),
     riskStats: stats,
     exportedAt: new Date().toISOString(),
@@ -227,7 +235,8 @@ export function exportToCSV(
   job: LiftingJob,
   annotations: Annotation[],
   ignoredRiskIds: string[],
-  showIgnored: boolean
+  showIgnored: boolean,
+  templates: AnnotationTemplate[] = []
 ): string {
   const visibleAnnotations = getVisibleAnnotations(
     annotations,
@@ -235,6 +244,8 @@ export function exportToCSV(
     showIgnored
   );
   const stats = computeRiskStats(annotations, ignoredRiskIds, showIgnored);
+  const tplMap = new Map<string, AnnotationTemplate>();
+  for (const t of templates) tplMap.set(t.id, t);
 
   const lines: string[] = [];
 
@@ -251,11 +262,14 @@ export function exportToCSV(
   lines.push("");
   lines.push("=== 风险批注 ===");
   lines.push(
-    "ID,时间戳,位置X,位置Y,位置Z,风险等级,批注内容,已忽略,创建时间"
+    "ID,时间戳,位置X,位置Y,位置Z,风险等级,批注内容,已忽略,创建时间,模板来源ID,模板名称"
   );
   for (const a of visibleAnnotations) {
+    const tplName = a.templateSourceId && tplMap.has(a.templateSourceId)
+      ? tplMap.get(a.templateSourceId)!.name
+      : "";
     lines.push(
-      `${a.id},${a.timestamp},${a.position[0]},${a.position[1]},${a.position[2]},${a.riskLevel},"${a.text.replace(/"/g, '""')}",${a.ignored},${a.createdAt}`
+      `${a.id},${a.timestamp},${a.position[0]},${a.position[1]},${a.position[2]},${a.riskLevel},"${a.text.replace(/"/g, '""')}",${a.ignored},${a.createdAt},${a.templateSourceId || ""},"${tplName.replace(/"/g, '""')}"`
     );
   }
 
@@ -283,7 +297,13 @@ export function downloadFile(content: string, filename: string, mime: string) {
   URL.revokeObjectURL(url);
 }
 
-export function exportToJSONFromSnapshot(snapshot: ExportSnapshot): string {
+export function exportToJSONFromSnapshot(
+  snapshot: ExportSnapshot,
+  templates: AnnotationTemplate[] = []
+): string {
+  const tplMap = new Map<string, AnnotationTemplate>();
+  for (const t of templates) tplMap.set(t.id, t);
+
   const report = {
     meta: snapshot.jobMeta,
     crane: snapshot.crane,
@@ -297,6 +317,10 @@ export function exportToJSONFromSnapshot(snapshot: ExportSnapshot): string {
       text: a.text,
       ignored: a.ignored,
       createdAt: a.createdAt,
+      templateSourceId: a.templateSourceId || null,
+      templateName: a.templateSourceId && tplMap.has(a.templateSourceId)
+        ? tplMap.get(a.templateSourceId)!.name
+        : null,
     })),
     riskStats: snapshot.riskStats,
     exportedAt: new Date().toISOString(),
@@ -320,7 +344,13 @@ export function exportToJSONFromSnapshot(snapshot: ExportSnapshot): string {
   return JSON.stringify(report, null, 2);
 }
 
-export function exportToCSVFromSnapshot(snapshot: ExportSnapshot): string {
+export function exportToCSVFromSnapshot(
+  snapshot: ExportSnapshot,
+  templates: AnnotationTemplate[] = []
+): string {
+  const tplMap = new Map<string, AnnotationTemplate>();
+  for (const t of templates) tplMap.set(t.id, t);
+
   const lines: string[] = [];
 
   lines.push("=== 快照信息 ===");
@@ -354,11 +384,14 @@ export function exportToCSVFromSnapshot(snapshot: ExportSnapshot): string {
   lines.push("");
   lines.push("=== 风险批注 ===");
   lines.push(
-    "ID,时间戳,位置X,位置Y,位置Z,风险等级,批注内容,已忽略,创建时间"
+    "ID,时间戳,位置X,位置Y,位置Z,风险等级,批注内容,已忽略,创建时间,模板来源ID,模板名称"
   );
   for (const a of snapshot.annotations) {
+    const tplName = a.templateSourceId && tplMap.has(a.templateSourceId)
+      ? tplMap.get(a.templateSourceId)!.name
+      : "";
     lines.push(
-      `${a.id},${a.timestamp},${a.position[0]},${a.position[1]},${a.position[2]},${a.riskLevel},"${a.text.replace(/"/g, '""')}",${a.ignored},${a.createdAt}`
+      `${a.id},${a.timestamp},${a.position[0]},${a.position[1]},${a.position[2]},${a.riskLevel},"${a.text.replace(/"/g, '""')}",${a.ignored},${a.createdAt},${a.templateSourceId || ""},"${tplName.replace(/"/g, '""')}"`
     );
   }
 

@@ -4,6 +4,7 @@ import type {
   LiftingJob,
   CameraPreset,
   Annotation,
+  AnnotationTemplate,
   ValidationError,
   RiskLevelFilter,
   CameraState,
@@ -38,6 +39,7 @@ interface AppState {
   currentSnapshotId: string | null;
   currentJobId: string | null;
   snapshotHistory: SnapshotHistoryEntry[];
+  templates: AnnotationTemplate[];
 
   setJob: (job: LiftingJob | null) => void;
   importJob: (raw: unknown) => { success: boolean; errors: ValidationError[] };
@@ -68,6 +70,10 @@ interface AppState {
   getCurrentSnapshot: () => ExportSnapshot | null;
   checkFilterChanged: () => boolean;
   undoLastSnapshotChange: () => { success: boolean; snapshot?: ExportSnapshot };
+  addTemplate: (t: AnnotationTemplate) => boolean;
+  updateTemplate: (id: string, updates: Partial<Omit<AnnotationTemplate, "id">>) => boolean;
+  deleteTemplate: (id: string) => void;
+  hasTemplateName: (name: string, excludeId?: string) => boolean;
   canUndo: () => boolean;
 }
 
@@ -123,6 +129,7 @@ export const useStore = create<AppState>()(
       currentSnapshotId: null,
       currentJobId: null,
       snapshotHistory: [],
+      templates: [],
 
       setJob: (job) => {
         const jobId = job ? getJobId(job) : null;
@@ -355,6 +362,43 @@ export const useStore = create<AppState>()(
         return { success: true, snapshot: restored };
       },
 
+      addTemplate: (t: AnnotationTemplate) => {
+        const state = get();
+        if (state.templates.some((tpl) => tpl.name === t.name)) {
+          return false;
+        }
+        set({ templates: [...state.templates, t] });
+        return true;
+      },
+
+      updateTemplate: (id: string, updates: Partial<Omit<AnnotationTemplate, "id">>) => {
+        const state = get();
+        if (updates.name !== undefined) {
+          const duplicate = state.templates.some(
+            (tpl) => tpl.name === updates.name && tpl.id !== id
+          );
+          if (duplicate) return false;
+        }
+        set({
+          templates: state.templates.map((tpl) =>
+            tpl.id === id ? { ...tpl, ...updates } : tpl
+          ),
+        });
+        return true;
+      },
+
+      deleteTemplate: (id: string) => {
+        set((s) => ({
+          templates: s.templates.filter((tpl) => tpl.id !== id),
+        }));
+      },
+
+      hasTemplateName: (name: string, excludeId?: string) => {
+        return get().templates.some(
+          (tpl) => tpl.name === name && tpl.id !== excludeId
+        );
+      },
+
       canUndo: () => {
         return get().snapshotHistory.length > 0;
       },
@@ -375,6 +419,7 @@ export const useStore = create<AppState>()(
         currentSnapshotId: state.currentSnapshotId,
         currentJobId: state.currentJobId,
         snapshotHistory: state.snapshotHistory,
+        templates: state.templates,
       }),
     }
   )

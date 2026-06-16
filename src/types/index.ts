@@ -60,6 +60,15 @@ export interface Annotation {
   text: string;
   ignored: boolean;
   createdAt: string;
+  templateSourceId?: string;
+}
+
+export interface AnnotationTemplate {
+  id: string;
+  name: string;
+  defaultRiskLevel: "safe" | "warning" | "danger";
+  defaultText: string;
+  createdAt: string;
 }
 
 export interface ValidationError {

@@ -20,7 +20,7 @@ import {
   exportToCSVFromSnapshot,
   downloadFile,
 } from "@/utils/export";
-import type { ExportSnapshot } from "@/types";
+import type { AnnotationTemplate, ExportSnapshot } from "@/types";
 
 export default function ExportPanel() {
   const [open, setOpen] = useState(false);
@@ -43,6 +43,13 @@ export default function ExportPanel() {
   const filterShowIgnored = useStore((s) => s.showIgnored);
   const filterRiskLevelFilter = useStore((s) => s.riskLevelFilter);
   const filterIgnoredRiskIds = useStore((s) => s.ignoredRiskIds);
+  const templates = useStore((s) => s.templates);
+
+  const templateMap = useMemo(() => {
+    const map = new Map<string, AnnotationTemplate>();
+    for (const t of templates) map.set(t.id, t);
+    return map;
+  }, [templates]);
 
   const snapshots = useMemo(() => {
     if (!currentJobId) return [];
@@ -152,14 +159,14 @@ export default function ExportPanel() {
       );
       if (!confirmed) return;
     }
-    const content = exportToJSONFromSnapshot(currentSnapshot);
+    const content = exportToJSONFromSnapshot(currentSnapshot, templates);
     const date = new Date().toISOString().slice(0, 10);
     downloadFile(
       content,
       `吊装复盘_${currentSnapshot.jobMeta.name}_${currentSnapshot.name}_${date}.json`,
       "application/json"
     );
-  }, [currentSnapshot, filterChanged]);
+  }, [currentSnapshot, filterChanged, templates]);
 
   const handleExportCSV = useCallback(() => {
     if (!currentSnapshot) {
@@ -172,14 +179,14 @@ export default function ExportPanel() {
       );
       if (!confirmed) return;
     }
-    const content = exportToCSVFromSnapshot(currentSnapshot);
+    const content = exportToCSVFromSnapshot(currentSnapshot, templates);
     const date = new Date().toISOString().slice(0, 10);
     downloadFile(
       content,
       `吊装复盘_${currentSnapshot.jobMeta.name}_${currentSnapshot.name}_${date}.csv`,
       "text/csv;charset=utf-8"
     );
-  }, [currentSnapshot, filterChanged]);
+  }, [currentSnapshot, filterChanged, templates]);
 
   const handleSelectSnapshot = useCallback(
     (snapshot: ExportSnapshot) => {
@@ -361,6 +368,8 @@ export default function ExportPanel() {
                     <div className="text-[10px] text-[#5A7A9E]">
                       {a.timestamp}ms · {a.riskLevel}
                       {a.ignored && " · 已忽略"}
+                      {a.templateSourceId && templateMap.has(a.templateSourceId) && ` · 模板: ${templateMap.get(a.templateSourceId)!.name}`}
+                      {a.templateSourceId && !templateMap.has(a.templateSourceId) && " · 模板已删"}
                     </div>
                   </div>
                 </div>
