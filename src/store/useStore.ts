@@ -149,9 +149,6 @@ export const useStore = create<AppState>()(
           set({
             errors: result.errors,
             lastImportFailure: failureRecord,
-            annotations: [],
-            ignoredRiskIds: [],
-            snapshotHistory: [],
           });
           return { success: false, errors: result.errors };
         }

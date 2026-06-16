@@ -207,6 +207,8 @@ describe("importJob - bad data blocking", () => {
 
     const stateBefore = store.getState();
     const jobBefore = stateBefore.job;
+    const annotationsBefore = stateBefore.annotations;
+    const ignoredBefore = stateBefore.ignoredRiskIds;
     const presetsBefore = stateBefore.cameraPresets;
     const timeBefore = stateBefore.currentTime;
 
@@ -219,16 +221,16 @@ describe("importJob - bad data blocking", () => {
 
     const stateAfter = store.getState();
     expect(stateAfter.job).toBe(jobBefore);
-    expect(stateAfter.annotations).toEqual([]);
-    expect(stateAfter.ignoredRiskIds).toEqual([]);
-    expect(stateAfter.snapshotHistory).toEqual([]);
+    expect(stateAfter.annotations).toBe(annotationsBefore);
+    expect(stateAfter.ignoredRiskIds).toBe(ignoredBefore);
+    expect(stateAfter.snapshotHistory).toEqual(stateBefore.snapshotHistory);
     expect(stateAfter.cameraPresets).toBe(presetsBefore);
     expect(stateAfter.currentTime).toBe(timeBefore);
   });
 });
 
 describe("importJob - state preservation after failure", () => {
-  it("cameraPresets, currentTime, showIgnored remain intact; annotations/ignored/snapshotHistory cleared after failed import", async () => {
+  it("annotations, ignoredRiskIds, cameraPresets, currentTime remain intact after failed import", async () => {
     const { useStore } = await import("@/store/useStore");
     const store = useStore;
 
@@ -253,9 +255,9 @@ describe("importJob - state preservation after failure", () => {
 
     const stateAfter = store.getState();
     expect(stateAfter.job).toBe(stateBefore.job);
-    expect(stateAfter.annotations).toEqual([]);
-    expect(stateAfter.ignoredRiskIds).toEqual([]);
-    expect(stateAfter.snapshotHistory).toEqual([]);
+    expect(stateAfter.annotations).toEqual(stateBefore.annotations);
+    expect(stateAfter.ignoredRiskIds).toEqual(stateBefore.ignoredRiskIds);
+    expect(stateAfter.snapshotHistory).toEqual(stateBefore.snapshotHistory);
     expect(stateAfter.cameraPresets).toEqual(stateBefore.cameraPresets);
     expect(stateAfter.currentTime).toBe(stateBefore.currentTime);
     expect(stateAfter.showIgnored).toBe(stateBefore.showIgnored);
@@ -1262,7 +1264,7 @@ describe("regression - doc-vs-implementation consistency", () => {
     });
   });
 
-  it("importJob resets annotations / ignoredRiskIds / snapshotHistory on success", async () => {
+  it("importJob resets annotations / ignoredRiskIds / snapshotHistory ONLY on success", async () => {
     const { useStore } = await import("@/store/useStore");
     const store = useStore;
     const jobA = makeValidJob();
@@ -1280,35 +1282,52 @@ describe("regression - doc-vs-implementation consistency", () => {
     expect(store.getState().ignoredRiskIds).toHaveLength(2);
     expect(store.getState().snapshotHistory).toHaveLength(1);
 
-    const result = store.getState().importJob(jobA);
-    expect(result.success).toBe(true);
+    const invalid = { meta: null, crane: {}, trajectory: [], restrictedZones: [] };
+    const fail = store.getState().importJob(invalid);
+    expect(fail.success).toBe(false);
+    expect(store.getState().annotations).toHaveLength(3);
+    expect(store.getState().ignoredRiskIds).toHaveLength(2);
+    expect(store.getState().snapshotHistory).toHaveLength(1);
+
+    const ok = store.getState().importJob(jobA);
+    expect(ok.success).toBe(true);
     expect(store.getState().annotations).toEqual([]);
     expect(store.getState().ignoredRiskIds).toEqual([]);
     expect(store.getState().snapshotHistory).toEqual([]);
   });
 
-  it("importJob resets annotations / ignoredRiskIds / snapshotHistory on validation failure", async () => {
+  it("failed import preserves currentSnapshotId, snapshots bucket and export-ability", async () => {
     const { useStore } = await import("@/store/useStore");
     const store = useStore;
 
-    store.setState({
-      annotations: makeAnnotations(3, "danger", 0),
-      ignoredRiskIds: ["ann-0"],
-      snapshotHistory: [{
-        snapshotId: "old",
-        previousVersion: {} as ExportSnapshot,
-        timestamp: new Date().toISOString(),
-      }],
-    });
+    store.getState().importJob(makeValidJob());
+    store.setState({ annotations: makeAnnotations(2, "warning", 0) });
+    const snap = store.getState().createExportSnapshot("失败前快照");
+    store.getState().saveSnapshot(snap);
+    const jobId = store.getState().currentJobId!;
+    const snapId = snap.id;
 
-    const invalid = { meta: null, crane: {}, trajectory: [], restrictedZones: [] };
-    const result = store.getState().importJob(invalid);
-    expect(result.success).toBe(false);
-    expect(result.errors.length).toBeGreaterThan(0);
-    expect(store.getState().annotations).toEqual([]);
-    expect(store.getState().ignoredRiskIds).toEqual([]);
-    expect(store.getState().snapshotHistory).toEqual([]);
-    expect(store.getState().errors.length).toBe(result.errors.length);
+    expect(jobId).toBeTruthy();
+    expect(store.getState().currentSnapshotId).toBe(snapId);
+    expect(store.getState().snapshots[jobId]).toHaveLength(1);
+    const exportedBefore = exportToJSONFromSnapshot(
+      store.getState().getCurrentSnapshot()!
+    );
+
+    const bad = { meta: {}, restrictedZones: [] };
+    const r = store.getState().importJob(bad);
+    expect(r.success).toBe(false);
+    expect(r.errors.length).toBeGreaterThan(0);
+
+    expect(store.getState().currentSnapshotId).toBe(snapId);
+    expect(store.getState().snapshots[jobId]).toHaveLength(1);
+    expect(store.getState().snapshots[jobId]![0].id).toBe(snapId);
+    expect(store.getState().annotations).toHaveLength(2);
+
+    const exportedAfter = exportToJSONFromSnapshot(
+      store.getState().getCurrentSnapshot()!
+    );
+    expect(exportedAfter).toEqual(exportedBefore);
   });
 
   it("sampleJob from src/data/sampleJob.ts matches README: no pre-baked annotations", async () => {

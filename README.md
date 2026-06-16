@@ -76,7 +76,7 @@ npm run check
 - 展开左上角「数据导入 ▼」面板
 - 点击面板内灰色上传区（文案「拖放 JSON 文件或点击选择」），或直接把 `.json` 文件拖入该区域
 - 校验通过时状态同花式 A
-- 校验不通过时：面板内显示红色标题「预检未通过，当前作业保持不变」，下方逐条列出红色错误信息（不会写进浏览器 console）
+- 校验不通过时：面板内显示红色标题「预检未通过，当前作业保持不变」，下方逐条列出红色错误信息（不会写进浏览器 console）；**当前作业、已有批注、忽略列表、快照选中状态与导出能力全部原样保留，不会被清空**
 
 ### 2. 调整筛选条件
 
@@ -209,9 +209,9 @@ npm run check
 - 回归测试：`src/__tests__/import-export.test.ts` 中 `regression - infinite re-render / white screen` 分组
 
 **跨作业批注串档（已修复）**：
-- 问题根因：`importJob` 成功/失败时未重置 `annotations`、`ignoredRiskIds`、`snapshotHistory`，导致上一个作业的批注串到新作业
-- 修复方案：`setJob` / `importJob` 三个分支都同步清空 annotations、ignoredRiskIds、snapshotHistory
-- 回归测试：`src/__tests__/import-export.test.ts` 中 `regression - doc-vs-implementation consistency` 分组
+- 问题根因：`importJob` 失败分支错误地清空了 `annotations`、`ignoredRiskIds`、`snapshotHistory`，导致提示"当前作业保持不变"但实际上作业内所有批注、快照撤销历史都被丢掉，用户无法基于原有快照继续导出
+- 修复方案：预检**失败**分支只写 `errors` 和 `lastImportFailure`，当前作业、批注、忽略、快照选中、撤销历史全部不动；只有**成功**导入新作业时才清空 annotations、ignoredRiskIds、snapshotHistory 并重置 currentSnapshotId
+- 回归测试：`src/__tests__/import-export.test.ts` 中 `regression - doc-vs-implementation consistency` 分组的 `ONLY on success` 和 `preserves currentSnapshotId, snapshots bucket and export-ability` 两条用例
 
 ## 目录结构
 
