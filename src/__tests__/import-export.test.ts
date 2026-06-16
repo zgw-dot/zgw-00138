@@ -1330,6 +1330,27 @@ describe("regression - doc-vs-implementation consistency", () => {
     expect(exportedAfter).toEqual(exportedBefore);
   });
 
+  it("failed import preserves job.meta so name/date/craneId remain visible", async () => {
+    const { useStore } = await import("@/store/useStore");
+    const store = useStore;
+
+    store.getState().importJob(makeValidJob());
+    const jobBefore = store.getState().job!;
+    const nameBefore = jobBefore.meta.name;
+    const dateBefore = jobBefore.meta.date;
+    const craneBefore = jobBefore.meta.craneId;
+    expect(store.getState().errors).toEqual([]);
+
+    const bad = { meta: {}, restrictedZones: [] };
+    const r = store.getState().importJob(bad);
+    expect(r.success).toBe(false);
+    expect(store.getState().errors.length).toBeGreaterThan(0);
+    expect(store.getState().job).toBe(jobBefore);
+    expect(store.getState().job!.meta.name).toBe(nameBefore);
+    expect(store.getState().job!.meta.date).toBe(dateBefore);
+    expect(store.getState().job!.meta.craneId).toBe(craneBefore);
+  });
+
   it("sampleJob from src/data/sampleJob.ts matches README: no pre-baked annotations", async () => {
     const mod = await import("@/data/sampleJob");
     expect(mod.sampleJob).toBeDefined();

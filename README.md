@@ -76,7 +76,7 @@ npm run check
 - 展开左上角「数据导入 ▼」面板
 - 点击面板内灰色上传区（文案「拖放 JSON 文件或点击选择」），或直接把 `.json` 文件拖入该区域
 - 校验通过时状态同花式 A
-- 校验不通过时：面板内显示红色标题「预检未通过，当前作业保持不变」，下方逐条列出红色错误信息（不会写进浏览器 console）；**当前作业、已有批注、忽略列表、快照选中状态与导出能力全部原样保留，不会被清空**
+- 校验不通过时：面板内显示红色标题「预检未通过，当前作业保持不变」，下方逐条列出红色错误信息（不会写进浏览器 console）；**当前作业、已有批注、忽略列表、快照选中状态与导出能力、作业名称、日期、起重机编号全部原样保留，不会被清空**；此时「数据加载成功」绿色提示会自动隐藏，仅保留作业元信息
 
 ### 2. 调整筛选条件
 
@@ -208,10 +208,10 @@ npm run check
 - 修复方案：将所有方法调用式 selector 改为直接订阅基础状态字段 + `useMemo` 派生；Scene3D 中 setCamera 增加浅比较去重，未变化时不触发 store 更新
 - 回归测试：`src/__tests__/import-export.test.ts` 中 `regression - infinite re-render / white screen` 分组
 
-**跨作业批注串档（已修复）**：
-- 问题根因：`importJob` 失败分支错误地清空了 `annotations`、`ignoredRiskIds`、`snapshotHistory`，导致提示"当前作业保持不变"但实际上作业内所有批注、快照撤销历史都被丢掉，用户无法基于原有快照继续导出
-- 修复方案：预检**失败**分支只写 `errors` 和 `lastImportFailure`，当前作业、批注、忽略、快照选中、撤销历史全部不动；只有**成功**导入新作业时才清空 annotations、ignoredRiskIds、snapshotHistory 并重置 currentSnapshotId
-- 回归测试：`src/__tests__/import-export.test.ts` 中 `regression - doc-vs-implementation consistency` 分组的 `ONLY on success` 和 `preserves currentSnapshotId, snapshots bucket and export-ability` 两条用例
+**跨作业批注串档 + 失败作业抬头消失（已修复）**：
+- 问题根因：① `importJob` 失败分支错误地清空了 `annotations`、`ignoredRiskIds`、`snapshotHistory`，导致提示"当前作业保持不变"但实际上作业内批注、撤销历史全部被清空；② ImportPanel 作业信息区多写了 `errors.length === 0` 条件，一出错就连作业名称、日期、起重机编号一起隐藏
+- 修复方案：预检**失败**分支只写 `errors` 和 `lastImportFailure`，当前作业、批注、忽略、快照选中、撤销历史全部不动；作业信息外层显示条件改为仅 `job` 存在就显示，把"数据加载成功"绿勾提示单独包 `errors.length === 0`；只有**成功**导入新作业时才清空 annotations、ignoredRiskIds、snapshotHistory 并重置 currentSnapshotId
+- 回归测试：`src/__tests__/import-export.test.ts` 中 `regression - doc-vs-implementation consistency` 分组的 `ONLY on success`、`preserves currentSnapshotId, snapshots bucket and export-ability`、`preserves job.meta so name/date/craneId remain visible` 三条用例
 
 ## 目录结构
 

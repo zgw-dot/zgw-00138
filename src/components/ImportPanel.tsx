@@ -157,12 +157,14 @@ export default function ImportPanel() {
             </div>
           )}
 
-          {job && errors.length === 0 && (
+          {job && (
             <div className="px-3 pb-3">
-              <div className="flex items-center gap-1.5 mb-2">
-                <CheckCircle size={14} className="text-green-400" />
-                <span className="text-xs text-green-400">数据加载成功</span>
-              </div>
+              {errors.length === 0 && (
+                <div className="flex items-center gap-1.5 mb-2">
+                  <CheckCircle size={14} className="text-green-400" />
+                  <span className="text-xs text-green-400">数据加载成功</span>
+                </div>
+              )}
               <div className="space-y-1 text-xs text-gray-400">
                 <div className="flex justify-between">
                   <span>作业名称</span>
