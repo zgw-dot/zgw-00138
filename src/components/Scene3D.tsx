@@ -12,6 +12,8 @@ import { useStore } from "@/store/useStore";
 function CameraController() {
   const { camera } = useThree();
   const controlsRef = useRef<any>(null);
+  const lastSyncRef = useRef(0);
+  const setCamera = useStore((s) => s.setCamera);
 
   const goToPreset = useCallback(
     (position: [number, number, number], target: [number, number, number]) => {
@@ -23,8 +25,9 @@ function CameraController() {
         controlsRef.current.target.set(...target);
         controlsRef.current.update();
       }
+      setCamera({ position, target });
     },
-    [camera]
+    [camera, setCamera]
   );
 
   useEffect(() => {
@@ -64,6 +67,17 @@ function CameraController() {
   useFrame(() => {
     if (controlsRef.current) {
       controlsRef.current.update();
+    }
+
+    const now = performance.now();
+    if (now - lastSyncRef.current > 200 && controlsRef.current) {
+      const pos = camera.position;
+      const target = controlsRef.current.target;
+      setCamera({
+        position: [pos.x, pos.y, pos.z] as [number, number, number],
+        target: [target.x, target.y, target.z] as [number, number, number],
+      });
+      lastSyncRef.current = now;
     }
   });
 

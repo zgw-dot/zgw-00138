@@ -67,3 +67,53 @@ export interface ValidationError {
   message: string;
   pointIndex?: number;
 }
+
+export type RiskLevel = "safe" | "warning" | "danger";
+
+export interface RiskLevelFilter {
+  safe: boolean;
+  warning: boolean;
+  danger: boolean;
+}
+
+export interface CameraState {
+  position: [number, number, number];
+  target: [number, number, number];
+}
+
+export interface ExportSnapshotFilter {
+  showIgnored: boolean;
+  riskLevelFilter: RiskLevelFilter;
+  ignoredRiskIds: string[];
+}
+
+export interface ExportSnapshot {
+  id: string;
+  name: string;
+  jobId: string;
+  jobMeta: LiftingJobMeta;
+  createdAt: string;
+  updatedAt: string;
+  currentTime: number;
+  camera: CameraState;
+  filter: ExportSnapshotFilter;
+  annotations: Annotation[];
+  riskStats: {
+    total: number;
+    danger: number;
+    warning: number;
+    safe: number;
+    ignored: number;
+    visible: number;
+    exported: number;
+  };
+  trajectory: TrajectoryPoint[];
+  crane: CraneConfig;
+  restrictedZones: RestrictedZone[];
+}
+
+export interface SnapshotHistoryEntry {
+  snapshotId: string;
+  previousVersion: ExportSnapshot;
+  timestamp: string;
+}

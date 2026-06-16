@@ -1,4 +1,10 @@
-import type { LiftingJob, Annotation } from "@/types";
+import type {
+  LiftingJob,
+  Annotation,
+  ExportSnapshot,
+  RiskLevelFilter,
+  CameraState,
+} from "@/types";
 
 interface RiskStats {
   total: number;
@@ -10,20 +16,32 @@ interface RiskStats {
   exported: number;
 }
 
+function generateId(): string {
+  return `snap-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+}
+
 function computeRiskStats(
   annotations: Annotation[],
   ignoredRiskIds: string[],
-  showIgnored: boolean
+  showIgnored: boolean,
+  riskLevelFilter: RiskLevelFilter = { safe: true, warning: true, danger: true }
 ): RiskStats {
   const total = annotations.length;
   const danger = annotations.filter((a) => a.riskLevel === "danger").length;
   const warning = annotations.filter((a) => a.riskLevel === "warning").length;
   const safe = annotations.filter((a) => a.riskLevel === "safe").length;
   const ignored = ignoredRiskIds.length;
-  const visible = showIgnored
-    ? total
-    : annotations.filter((a) => !ignoredRiskIds.includes(a.id)).length;
+
+  const visibleAnnotations = getFilteredAnnotations(
+    annotations,
+    ignoredRiskIds,
+    showIgnored,
+    riskLevelFilter
+  );
+
+  const visible = visibleAnnotations.length;
   const exported = visible;
+
   return { total, danger, warning, safe, ignored, visible, exported };
 }
 
@@ -35,6 +53,134 @@ function getVisibleAnnotations(
   return showIgnored
     ? annotations
     : annotations.filter((a) => !ignoredRiskIds.includes(a.id));
+}
+
+function getFilteredAnnotations(
+  annotations: Annotation[],
+  ignoredRiskIds: string[],
+  showIgnored: boolean,
+  riskLevelFilter: RiskLevelFilter
+): Annotation[] {
+  return annotations.filter((a) => {
+    if (!showIgnored && ignoredRiskIds.includes(a.id)) {
+      return false;
+    }
+    if (!riskLevelFilter[a.riskLevel]) {
+      return false;
+    }
+    return true;
+  });
+}
+
+function areFiltersEqual(
+  f1: { showIgnored: boolean; riskLevelFilter: RiskLevelFilter; ignoredRiskIds: string[] },
+  f2: { showIgnored: boolean; riskLevelFilter: RiskLevelFilter; ignoredRiskIds: string[] }
+): boolean {
+  return (
+    f1.showIgnored === f2.showIgnored &&
+    f1.riskLevelFilter.safe === f2.riskLevelFilter.safe &&
+    f1.riskLevelFilter.warning === f2.riskLevelFilter.warning &&
+    f1.riskLevelFilter.danger === f2.riskLevelFilter.danger &&
+    f1.ignoredRiskIds.length === f2.ignoredRiskIds.length &&
+    f1.ignoredRiskIds.every((id) => f2.ignoredRiskIds.includes(id))
+  );
+}
+
+function createSnapshot(
+  job: LiftingJob,
+  annotations: Annotation[],
+  currentTime: number,
+  camera: CameraState,
+  showIgnored: boolean,
+  riskLevelFilter: RiskLevelFilter,
+  ignoredRiskIds: string[],
+  name: string
+): ExportSnapshot {
+  const filteredAnnotations = getFilteredAnnotations(
+    annotations,
+    ignoredRiskIds,
+    showIgnored,
+    riskLevelFilter
+  );
+
+  const riskStats = computeRiskStats(
+    annotations,
+    ignoredRiskIds,
+    showIgnored,
+    riskLevelFilter
+  );
+
+  const now = new Date().toISOString();
+  const jobId = `${job.meta.name}-${job.meta.date}-${job.meta.craneId}`;
+
+  return {
+    id: generateId(),
+    name,
+    jobId,
+    jobMeta: { ...job.meta },
+    createdAt: now,
+    updatedAt: now,
+    currentTime,
+    camera: { ...camera },
+    filter: {
+      showIgnored,
+      riskLevelFilter: { ...riskLevelFilter },
+      ignoredRiskIds: [...ignoredRiskIds],
+    },
+    annotations: filteredAnnotations.map((a) => ({ ...a })),
+    riskStats,
+    trajectory: job.trajectory.map((p) => ({ ...p })),
+    crane: { ...job.crane, position: [...job.crane.position] as [number, number, number] },
+    restrictedZones: job.restrictedZones.map((z) => ({
+      ...z,
+      position: [...z.position] as [number, number, number],
+    })),
+  };
+}
+
+function updateSnapshot(
+  existing: ExportSnapshot,
+  job: LiftingJob,
+  annotations: Annotation[],
+  currentTime: number,
+  camera: CameraState,
+  showIgnored: boolean,
+  riskLevelFilter: RiskLevelFilter,
+  ignoredRiskIds: string[]
+): ExportSnapshot {
+  const filteredAnnotations = getFilteredAnnotations(
+    annotations,
+    ignoredRiskIds,
+    showIgnored,
+    riskLevelFilter
+  );
+
+  const riskStats = computeRiskStats(
+    annotations,
+    ignoredRiskIds,
+    showIgnored,
+    riskLevelFilter
+  );
+
+  return {
+    ...existing,
+    updatedAt: new Date().toISOString(),
+    currentTime,
+    camera: { ...camera },
+    filter: {
+      showIgnored,
+      riskLevelFilter: { ...riskLevelFilter },
+      ignoredRiskIds: [...ignoredRiskIds],
+    },
+    annotations: filteredAnnotations.map((a) => ({ ...a })),
+    riskStats,
+    trajectory: job.trajectory.map((p) => ({ ...p })),
+    crane: { ...job.crane, position: [...job.crane.position] as [number, number, number] },
+    restrictedZones: job.restrictedZones.map((z) => ({
+      ...z,
+      position: [...z.position] as [number, number, number],
+    })),
+  };
 }
 
 export function exportToJSON(
@@ -137,4 +283,104 @@ export function downloadFile(content: string, filename: string, mime: string) {
   URL.revokeObjectURL(url);
 }
 
-export { computeRiskStats, getVisibleAnnotations };
+export function exportToJSONFromSnapshot(snapshot: ExportSnapshot): string {
+  const report = {
+    meta: snapshot.jobMeta,
+    crane: snapshot.crane,
+    restrictedZones: snapshot.restrictedZones,
+    trajectory: snapshot.trajectory,
+    annotations: snapshot.annotations.map((a) => ({
+      id: a.id,
+      timestamp: a.timestamp,
+      position: a.position,
+      riskLevel: a.riskLevel,
+      text: a.text,
+      ignored: a.ignored,
+      createdAt: a.createdAt,
+    })),
+    riskStats: snapshot.riskStats,
+    exportedAt: new Date().toISOString(),
+    snapshotInfo: {
+      id: snapshot.id,
+      name: snapshot.name,
+      createdAt: snapshot.createdAt,
+      updatedAt: snapshot.updatedAt,
+      currentTime: snapshot.currentTime,
+      camera: snapshot.camera,
+    },
+    exportOptions: {
+      includeIgnored: snapshot.filter.showIgnored,
+      riskLevelFilter: snapshot.filter.riskLevelFilter,
+      ignoredCount: snapshot.filter.ignoredRiskIds.length,
+      visibleCount: snapshot.riskStats.visible,
+      exportedCount: snapshot.riskStats.exported,
+    },
+  };
+
+  return JSON.stringify(report, null, 2);
+}
+
+export function exportToCSVFromSnapshot(snapshot: ExportSnapshot): string {
+  const lines: string[] = [];
+
+  lines.push("=== 快照信息 ===");
+  lines.push(`快照名称,${snapshot.name}`);
+  lines.push(`快照ID,${snapshot.id}`);
+  lines.push(`创建时间,${snapshot.createdAt}`);
+  lines.push(`更新时间,${snapshot.updatedAt}`);
+  lines.push(`时间轴位置,${snapshot.currentTime}`);
+  lines.push(`相机位置,"${snapshot.camera.position.join(", ")}"`);
+  lines.push(`相机目标,"${snapshot.camera.target.join(", ")}"`);
+  lines.push("");
+
+  lines.push("=== 筛选条件 ===");
+  lines.push(`包含已忽略,${snapshot.filter.showIgnored}`);
+  lines.push(`显示安全,${snapshot.filter.riskLevelFilter.safe}`);
+  lines.push(`显示警告,${snapshot.filter.riskLevelFilter.warning}`);
+  lines.push(`显示危险,${snapshot.filter.riskLevelFilter.danger}`);
+  lines.push(`已忽略列表,"${snapshot.filter.ignoredRiskIds.join(", ")}"`);
+  lines.push("");
+
+  lines.push("=== 轨迹数据 ===");
+  lines.push(
+    "时间戳,吊钩X,吊钩Y,吊钩Z,吊臂角度,载重(t),作业半径,风险等级,备注"
+  );
+  for (const pt of snapshot.trajectory) {
+    lines.push(
+      `${pt.timestamp},${pt.hookPosition[0]},${pt.hookPosition[1]},${pt.hookPosition[2]},${pt.boomAngle},${pt.load},${pt.radius},${pt.riskLevel || "safe"},"${(pt.note || "").replace(/"/g, '""')}"`
+    );
+  }
+
+  lines.push("");
+  lines.push("=== 风险批注 ===");
+  lines.push(
+    "ID,时间戳,位置X,位置Y,位置Z,风险等级,批注内容,已忽略,创建时间"
+  );
+  for (const a of snapshot.annotations) {
+    lines.push(
+      `${a.id},${a.timestamp},${a.position[0]},${a.position[1]},${a.position[2]},${a.riskLevel},"${a.text.replace(/"/g, '""')}",${a.ignored},${a.createdAt}`
+    );
+  }
+
+  lines.push("");
+  lines.push("=== 风险统计 ===");
+  lines.push(`批注总数,${snapshot.riskStats.total}`);
+  lines.push(`危险,${snapshot.riskStats.danger}`);
+  lines.push(`警告,${snapshot.riskStats.warning}`);
+  lines.push(`安全,${snapshot.riskStats.safe}`);
+  lines.push(`已忽略,${snapshot.riskStats.ignored}`);
+  lines.push(`可见,${snapshot.riskStats.visible}`);
+  lines.push(`导出,${snapshot.riskStats.exported}`);
+
+  return lines.join("\n");
+}
+
+export {
+  computeRiskStats,
+  getVisibleAnnotations,
+  getFilteredAnnotations,
+  createSnapshot,
+  updateSnapshot,
+  areFiltersEqual,
+};
+

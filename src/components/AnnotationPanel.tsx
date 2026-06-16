@@ -18,6 +18,7 @@ export default function AnnotationPanel() {
   const annotations = useStore((s) => s.annotations);
   const ignoredRiskIds = useStore((s) => s.ignoredRiskIds);
   const showIgnored = useStore((s) => s.showIgnored);
+  const riskLevelFilter = useStore((s) => s.riskLevelFilter);
   const currentTime = useStore((s) => s.currentTime);
   const job = useStore((s) => s.job);
   const addAnnotation = useStore((s) => s.addAnnotation);
@@ -25,6 +26,7 @@ export default function AnnotationPanel() {
   const removeAnnotation = useStore((s) => s.removeAnnotation);
   const toggleIgnoreRisk = useStore((s) => s.toggleIgnoreRisk);
   const setShowIgnored = useStore((s) => s.setShowIgnored);
+  const setRiskLevelFilter = useStore((s) => s.setRiskLevelFilter);
   const rightPanelOpen = useStore((s) => s.rightPanelOpen);
   const setRightPanelOpen = useStore((s) => s.setRightPanelOpen);
 
@@ -35,20 +37,15 @@ export default function AnnotationPanel() {
   );
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editText, setEditText] = useState("");
-  const [filterLevel, setFilterLevel] = useState<
-    "all" | "safe" | "warning" | "danger"
-  >("all");
 
   const visibleAnnotations = useMemo(() => {
     let filtered = annotations;
     if (!showIgnored) {
       filtered = filtered.filter((a) => !ignoredRiskIds.includes(a.id));
     }
-    if (filterLevel !== "all") {
-      filtered = filtered.filter((a) => a.riskLevel === filterLevel);
-    }
+    filtered = filtered.filter((a) => riskLevelFilter[a.riskLevel]);
     return filtered.sort((a, b) => b.timestamp - a.timestamp);
-  }, [annotations, ignoredRiskIds, showIgnored, filterLevel]);
+  }, [annotations, ignoredRiskIds, showIgnored, riskLevelFilter]);
 
   const handleAdd = useCallback(() => {
     if (!newText.trim()) return;
@@ -105,30 +102,41 @@ export default function AnnotationPanel() {
 
       {rightPanelOpen && (
         <div className="bg-[#0F1B2D]/90 backdrop-blur rounded-lg border border-[#1E3A5F]/60 overflow-hidden max-h-[calc(100vh-200px)] flex flex-col">
-          <div className="p-2 border-b border-[#1E3A5F]/60 flex items-center gap-2 flex-shrink-0">
-            <Filter size={12} className="text-[#5A7A9E]" />
-            <select
-              value={filterLevel}
-              onChange={(e) => setFilterLevel(e.target.value as typeof filterLevel)}
-              className="bg-[#0A1628] border border-[#1E3A5F]/60 rounded px-2 py-1 text-xs text-[#8BA4C7] outline-none"
-            >
-              <option value="all">全部</option>
-              <option value="danger">危险</option>
-              <option value="warning">警告</option>
-              <option value="safe">安全</option>
-            </select>
-
-            <button
-              onClick={() => setShowIgnored(!showIgnored)}
-              className="ml-auto flex items-center gap-1 text-xs text-[#5A7A9E] hover:text-white transition-colors"
-            >
-              {showIgnored ? (
-                <ToggleRight size={16} className="text-cyan-400" />
-              ) : (
-                <ToggleLeft size={16} />
-              )}
-              <span>{showIgnored ? "显示忽略" : "隐藏忽略"}</span>
-            </button>
+          <div className="p-2 border-b border-[#1E3A5F]/60 flex-shrink-0">
+            <div className="flex items-center gap-1 mb-2">
+              <Filter size={12} className="text-[#5A7A9E]" />
+              <span className="text-xs text-[#5A7A9E]">风险等级</span>
+            </div>
+            <div className="flex items-center gap-1">
+              {(["safe", "warning", "danger"] as const).map((level) => (
+                <button
+                  key={level}
+                  onClick={() =>
+                    setRiskLevelFilter({ [level]: !riskLevelFilter[level] })
+                  }
+                  className={`px-2 py-0.5 rounded text-[10px] font-medium border transition-colors ${
+                    riskLevelFilter[level]
+                      ? riskBadgeClass(level)
+                      : "bg-transparent border-[#1E3A5F]/40 text-[#3D5A7A]"
+                  }`}
+                >
+                  {riskLabel(level)}
+                </button>
+              ))}
+              <button
+                onClick={() => setShowIgnored(!showIgnored)}
+                className="ml-auto flex items-center gap-1 text-xs text-[#5A7A9E] hover:text-white transition-colors"
+              >
+                {showIgnored ? (
+                  <ToggleRight size={16} className="text-cyan-400" />
+                ) : (
+                  <ToggleLeft size={16} />
+                )}
+                <span className="hidden sm:inline">
+                  {showIgnored ? "显示忽略" : "隐藏忽略"}
+                </span>
+              </button>
+            </div>
           </div>
 
           <div className="flex-1 overflow-y-auto p-2 space-y-2">
