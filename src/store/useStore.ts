@@ -75,6 +75,8 @@ interface AppState {
   deleteTemplate: (id: string) => void;
   hasTemplateName: (name: string, excludeId?: string) => boolean;
   canUndo: () => boolean;
+  checkDataChanged: () => boolean;
+  isSnapshotStale: () => boolean;
 }
 
 const defaultCameraPresets: CameraPreset[] = [
@@ -401,6 +403,40 @@ export const useStore = create<AppState>()(
 
       canUndo: () => {
         return get().snapshotHistory.length > 0;
+      },
+
+      checkDataChanged: () => {
+        const state = get();
+        const snapshot = state.getCurrentSnapshot();
+        if (!snapshot) return false;
+        const currentIds = new Set(state.annotations.map((a) => a.id));
+        const snapshotIds = new Set(snapshot.annotations.map((a) => a.id));
+        if (currentIds.size !== snapshotIds.size) return true;
+        for (const id of currentIds) {
+          if (!snapshotIds.has(id)) return true;
+        }
+        for (const id of snapshotIds) {
+          if (!currentIds.has(id)) return true;
+        }
+        for (const ann of state.annotations) {
+          const snapAnn = snapshot.annotations.find((a) => a.id === ann.id);
+          if (!snapAnn) return true;
+          if (
+            ann.riskLevel !== snapAnn.riskLevel ||
+            ann.text !== snapAnn.text ||
+            ann.ignored !== snapAnn.ignored ||
+            ann.templateSourceId !== snapAnn.templateSourceId ||
+            ann.templateSourceName !== snapAnn.templateSourceName
+          ) {
+            return true;
+          }
+        }
+        return false;
+      },
+
+      isSnapshotStale: () => {
+        const state = get();
+        return state.checkDataChanged() || state.checkFilterChanged();
       },
     }),
     {

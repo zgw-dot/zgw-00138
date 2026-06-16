@@ -61,6 +61,7 @@ export interface Annotation {
   ignored: boolean;
   createdAt: string;
   templateSourceId?: string;
+  templateSourceName?: string;
 }
 
 export interface AnnotationTemplate {

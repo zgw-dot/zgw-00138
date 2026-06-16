@@ -17,6 +17,16 @@ interface RiskStats {
   exported: number;
 }
 
+function resolveTemplateName(
+  a: { templateSourceId?: string; templateSourceName?: string },
+  tplMap: Map<string, AnnotationTemplate>
+): string | null {
+  if (!a.templateSourceId) return null;
+  if (a.templateSourceName) return a.templateSourceName;
+  if (tplMap.has(a.templateSourceId)) return tplMap.get(a.templateSourceId)!.name;
+  return null;
+}
+
 function generateId(): string {
   return `snap-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
 }
@@ -214,9 +224,7 @@ export function exportToJSON(
       ignored: a.ignored,
       createdAt: a.createdAt,
       templateSourceId: a.templateSourceId || null,
-      templateName: a.templateSourceId && tplMap.has(a.templateSourceId)
-        ? tplMap.get(a.templateSourceId)!.name
-        : null,
+      templateName: resolveTemplateName(a, tplMap),
     })),
     riskStats: stats,
     exportedAt: new Date().toISOString(),
@@ -265,9 +273,7 @@ export function exportToCSV(
     "ID,时间戳,位置X,位置Y,位置Z,风险等级,批注内容,已忽略,创建时间,模板来源ID,模板名称"
   );
   for (const a of visibleAnnotations) {
-    const tplName = a.templateSourceId && tplMap.has(a.templateSourceId)
-      ? tplMap.get(a.templateSourceId)!.name
-      : "";
+    const tplName = resolveTemplateName(a, tplMap) || "";
     lines.push(
       `${a.id},${a.timestamp},${a.position[0]},${a.position[1]},${a.position[2]},${a.riskLevel},"${a.text.replace(/"/g, '""')}",${a.ignored},${a.createdAt},${a.templateSourceId || ""},"${tplName.replace(/"/g, '""')}"`
     );
@@ -318,9 +324,7 @@ export function exportToJSONFromSnapshot(
       ignored: a.ignored,
       createdAt: a.createdAt,
       templateSourceId: a.templateSourceId || null,
-      templateName: a.templateSourceId && tplMap.has(a.templateSourceId)
-        ? tplMap.get(a.templateSourceId)!.name
-        : null,
+      templateName: resolveTemplateName(a, tplMap),
     })),
     riskStats: snapshot.riskStats,
     exportedAt: new Date().toISOString(),
@@ -387,9 +391,7 @@ export function exportToCSVFromSnapshot(
     "ID,时间戳,位置X,位置Y,位置Z,风险等级,批注内容,已忽略,创建时间,模板来源ID,模板名称"
   );
   for (const a of snapshot.annotations) {
-    const tplName = a.templateSourceId && tplMap.has(a.templateSourceId)
-      ? tplMap.get(a.templateSourceId)!.name
-      : "";
+    const tplName = resolveTemplateName(a, tplMap) || "";
     lines.push(
       `${a.id},${a.timestamp},${a.position[0]},${a.position[1]},${a.position[2]},${a.riskLevel},"${a.text.replace(/"/g, '""')}",${a.ignored},${a.createdAt},${a.templateSourceId || ""},"${tplName.replace(/"/g, '""')}"`
     );

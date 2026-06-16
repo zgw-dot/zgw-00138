@@ -601,7 +601,11 @@ describe("snapshot - danger filter export consistency", () => {
     const jsonFromSnapshot = exportToJSONFromSnapshot(snapshot);
     const csvFromSnapshot = exportToCSVFromSnapshot(snapshot);
 
-    expect(jsonFromSnapshot).toBe(jsonBefore);
+    const parsedJsonBefore = JSON.parse(jsonBefore);
+    const parsedJsonAfter = JSON.parse(jsonFromSnapshot);
+    delete parsedJsonBefore.exportedAt;
+    delete parsedJsonAfter.exportedAt;
+    expect(parsedJsonAfter).toEqual(parsedJsonBefore);
     expect(csvFromSnapshot).toBe(csvBefore);
 
     const jsonFromModifiedSnapshot = exportToJSONFromSnapshot(newSnapshot);
@@ -1328,7 +1332,11 @@ describe("regression - doc-vs-implementation consistency", () => {
     const exportedAfter = exportToJSONFromSnapshot(
       store.getState().getCurrentSnapshot()!
     );
-    expect(exportedAfter).toEqual(exportedBefore);
+    const parsedBefore = JSON.parse(exportedBefore);
+    const parsedAfter = JSON.parse(exportedAfter);
+    delete parsedBefore.exportedAt;
+    delete parsedAfter.exportedAt;
+    expect(parsedAfter).toEqual(parsedBefore);
   });
 
   it("failed import preserves job.meta so name/date/craneId remain visible", async () => {
@@ -1990,5 +1998,1083 @@ describe("template - filter consistency", () => {
     const csv = exportToCSVFromSnapshot(snapshot, [tpl]);
     const annRows = csv.split("\n").filter((l) => l.startsWith("ann-"));
     expect(annRows).toHaveLength(0);
+  });
+});
+
+describe("snapshot-first workflow - create snapshot then apply template", () => {
+  const baseJob = makeValidJob();
+  const defaultCamera = {
+    position: [0, 80, 0.1] as [number, number, number],
+    target: [0, 0, 0] as [number, number, number],
+  };
+  const allLevels: RiskLevelFilter = { safe: true, warning: true, danger: true };
+
+  beforeEach(async () => {
+    const { useStore } = await import("@/store/useStore");
+    useStore.setState({
+      job: null,
+      currentTime: 0,
+      annotations: [],
+      ignoredRiskIds: [],
+      showIgnored: true,
+      riskLevelFilter: allLevels,
+      camera: defaultCamera,
+      snapshots: {},
+      currentSnapshotId: null,
+      currentJobId: null,
+      snapshotHistory: [],
+      cameraPresets: [],
+      lastImportSuccess: null,
+      lastImportFailure: null,
+      templates: [],
+    });
+  });
+
+  it("create snapshot first, then apply template -> snapshot becomes stale -> update -> export aligns", async () => {
+    const { useStore } = await import("@/store/useStore");
+    const store = useStore;
+
+    const tpl: TplType = {
+      id: "tpl-workflow",
+      name: "越界作业",
+      defaultRiskLevel: "danger",
+      defaultText: "吊臂越界进入限制区",
+      createdAt: new Date().toISOString(),
+    };
+    store.getState().addTemplate(tpl);
+
+    store.getState().importJob(baseJob);
+    store.getState().addAnnotation({
+      id: "ann-initial",
+      timestamp: 1000,
+      position: [0, 0, 0],
+      riskLevel: "warning",
+      text: "初始批注",
+      ignored: false,
+      createdAt: new Date().toISOString(),
+    });
+
+    const snapshot = store.getState().createExportSnapshot("初始快照");
+    store.getState().saveSnapshot(snapshot);
+    expect(store.getState().isSnapshotStale()).toBe(false);
+
+    store.getState().addAnnotation({
+      id: "ann-from-tpl",
+      timestamp: 2000,
+      position: [0, 0, 0],
+      riskLevel: "danger",
+      text: "吊臂越界进入限制区",
+      ignored: false,
+      createdAt: new Date().toISOString(),
+      templateSourceId: "tpl-workflow",
+      templateSourceName: "越界作业",
+    });
+
+    expect(store.getState().checkDataChanged()).toBe(true);
+    expect(store.getState().isSnapshotStale()).toBe(true);
+
+    const currentSnap = store.getState().getCurrentSnapshot()!;
+    expect(currentSnap.annotations).toHaveLength(1);
+
+    const jsonBeforeUpdate = exportToJSONFromSnapshot(currentSnap, [tpl]);
+    const parsedBefore = JSON.parse(jsonBeforeUpdate);
+    expect(parsedBefore.annotations).toHaveLength(1);
+
+    const updateResult = store.getState().updateCurrentSnapshot();
+    expect(updateResult.success).toBe(true);
+    expect(store.getState().isSnapshotStale()).toBe(false);
+
+    const updatedSnap = store.getState().getCurrentSnapshot()!;
+    expect(updatedSnap.annotations).toHaveLength(2);
+
+    const jsonAfter = exportToJSONFromSnapshot(updatedSnap, [tpl]);
+    const parsedAfter = JSON.parse(jsonAfter);
+    expect(parsedAfter.annotations).toHaveLength(2);
+    expect(parsedAfter.riskStats.exported).toBe(2);
+
+    const csvAfter = exportToCSVFromSnapshot(updatedSnap, [tpl]);
+    const annRows = csvAfter.split("\n").filter((l) => l.startsWith("ann-"));
+    expect(annRows).toHaveLength(2);
+
+    const tplAnn = parsedAfter.annotations.find((a: Annotation) => a.id === "ann-from-tpl");
+    expect(tplAnn.templateSourceId).toBe("tpl-workflow");
+    expect(tplAnn.templateName).toBe("越界作业");
+  });
+
+  it("snapshot-first then add annotation then undo -> export aligns to pre-add state", async () => {
+    const { useStore } = await import("@/store/useStore");
+    const store = useStore;
+
+    store.getState().importJob(baseJob);
+    store.getState().addAnnotation({
+      id: "ann-1",
+      timestamp: 1000,
+      position: [0, 0, 0],
+      riskLevel: "warning",
+      text: "初始",
+      ignored: false,
+      createdAt: new Date().toISOString(),
+    });
+
+    const snapshot = store.getState().createExportSnapshot("撤销测试");
+    store.getState().saveSnapshot(snapshot);
+
+    store.getState().addAnnotation({
+      id: "ann-2",
+      timestamp: 2000,
+      position: [0, 0, 0],
+      riskLevel: "danger",
+      text: "新增",
+      ignored: false,
+      createdAt: new Date().toISOString(),
+    });
+    expect(store.getState().isSnapshotStale()).toBe(true);
+
+    store.getState().updateCurrentSnapshot();
+    const updated = store.getState().getCurrentSnapshot()!;
+    expect(updated.annotations).toHaveLength(2);
+
+    store.getState().undoLastSnapshotChange();
+    const restored = store.getState().getCurrentSnapshot()!;
+    expect(restored.annotations).toHaveLength(1);
+    expect(restored.annotations[0].id).toBe("ann-1");
+
+    const json = exportToJSONFromSnapshot(restored);
+    const parsed = JSON.parse(json);
+    expect(parsed.annotations).toHaveLength(1);
+    expect(parsed.riskStats.exported).toBe(1);
+
+    const csv = exportToCSVFromSnapshot(restored);
+    const rows = csv.split("\n").filter((l) => l.startsWith("ann-"));
+    expect(rows).toHaveLength(1);
+  });
+});
+
+describe("data staleness detection - checkDataChanged", () => {
+  const baseJob = makeValidJob();
+  const defaultCamera = {
+    position: [0, 80, 0.1] as [number, number, number],
+    target: [0, 0, 0] as [number, number, number],
+  };
+  const allLevels: RiskLevelFilter = { safe: true, warning: true, danger: true };
+
+  beforeEach(async () => {
+    const { useStore } = await import("@/store/useStore");
+    useStore.setState({
+      job: null,
+      currentTime: 0,
+      annotations: [],
+      ignoredRiskIds: [],
+      showIgnored: true,
+      riskLevelFilter: allLevels,
+      camera: defaultCamera,
+      snapshots: {},
+      currentSnapshotId: null,
+      currentJobId: null,
+      snapshotHistory: [],
+      cameraPresets: [],
+      lastImportSuccess: null,
+      lastImportFailure: null,
+      templates: [],
+    });
+  });
+
+  it("returns false when no snapshot exists", async () => {
+    const { useStore } = await import("@/store/useStore");
+    const store = useStore;
+    store.getState().importJob(baseJob);
+    expect(store.getState().checkDataChanged()).toBe(false);
+  });
+
+  it("returns false right after snapshot creation", async () => {
+    const { useStore } = await import("@/store/useStore");
+    const store = useStore;
+    store.getState().importJob(baseJob);
+    store.getState().addAnnotation({
+      id: "ann-1",
+      timestamp: 1000,
+      position: [0, 0, 0],
+      riskLevel: "warning",
+      text: "test",
+      ignored: false,
+      createdAt: new Date().toISOString(),
+    });
+    const snapshot = store.getState().createExportSnapshot("test");
+    store.getState().saveSnapshot(snapshot);
+    expect(store.getState().checkDataChanged()).toBe(false);
+  });
+
+  it("detects added annotation", async () => {
+    const { useStore } = await import("@/store/useStore");
+    const store = useStore;
+    store.getState().importJob(baseJob);
+    const snapshot = store.getState().createExportSnapshot("test");
+    store.getState().saveSnapshot(snapshot);
+
+    store.getState().addAnnotation({
+      id: "ann-new",
+      timestamp: 1000,
+      position: [0, 0, 0],
+      riskLevel: "danger",
+      text: "new",
+      ignored: false,
+      createdAt: new Date().toISOString(),
+    });
+    expect(store.getState().checkDataChanged()).toBe(true);
+  });
+
+  it("detects removed annotation", async () => {
+    const { useStore } = await import("@/store/useStore");
+    const store = useStore;
+    store.getState().importJob(baseJob);
+    store.getState().addAnnotation({
+      id: "ann-del",
+      timestamp: 1000,
+      position: [0, 0, 0],
+      riskLevel: "danger",
+      text: "to delete",
+      ignored: false,
+      createdAt: new Date().toISOString(),
+    });
+    const snapshot = store.getState().createExportSnapshot("test");
+    store.getState().saveSnapshot(snapshot);
+
+    store.getState().removeAnnotation("ann-del");
+    expect(store.getState().checkDataChanged()).toBe(true);
+  });
+
+  it("detects changed risk level", async () => {
+    const { useStore } = await import("@/store/useStore");
+    const store = useStore;
+    store.getState().importJob(baseJob);
+    store.getState().addAnnotation({
+      id: "ann-risk",
+      timestamp: 1000,
+      position: [0, 0, 0],
+      riskLevel: "warning",
+      text: "risk change",
+      ignored: false,
+      createdAt: new Date().toISOString(),
+    });
+    const snapshot = store.getState().createExportSnapshot("test");
+    store.getState().saveSnapshot(snapshot);
+
+    store.getState().updateAnnotation("ann-risk", { riskLevel: "danger" });
+    expect(store.getState().checkDataChanged()).toBe(true);
+  });
+
+  it("detects changed text", async () => {
+    const { useStore } = await import("@/store/useStore");
+    const store = useStore;
+    store.getState().importJob(baseJob);
+    store.getState().addAnnotation({
+      id: "ann-text",
+      timestamp: 1000,
+      position: [0, 0, 0],
+      riskLevel: "warning",
+      text: "original",
+      ignored: false,
+      createdAt: new Date().toISOString(),
+    });
+    const snapshot = store.getState().createExportSnapshot("test");
+    store.getState().saveSnapshot(snapshot);
+
+    store.getState().updateAnnotation("ann-text", { text: "modified" });
+    expect(store.getState().checkDataChanged()).toBe(true);
+  });
+
+  it("detects ignored state change on annotation", async () => {
+    const { useStore } = await import("@/store/useStore");
+    const store = useStore;
+    store.getState().importJob(baseJob);
+    store.getState().addAnnotation({
+      id: "ann-ignore",
+      timestamp: 1000,
+      position: [0, 0, 0],
+      riskLevel: "warning",
+      text: "ignore test",
+      ignored: false,
+      createdAt: new Date().toISOString(),
+    });
+    const snapshot = store.getState().createExportSnapshot("test");
+    store.getState().saveSnapshot(snapshot);
+
+    store.getState().updateAnnotation("ann-ignore", { ignored: true });
+    expect(store.getState().checkDataChanged()).toBe(true);
+  });
+
+  it("toggleIgnoreRisk is detected by isSnapshotStale via filter change", async () => {
+    const { useStore } = await import("@/store/useStore");
+    const store = useStore;
+    store.getState().importJob(baseJob);
+    store.getState().addAnnotation({
+      id: "ann-ignore-filter",
+      timestamp: 1000,
+      position: [0, 0, 0],
+      riskLevel: "warning",
+      text: "filter ignore test",
+      ignored: false,
+      createdAt: new Date().toISOString(),
+    });
+    const snapshot = store.getState().createExportSnapshot("test");
+    store.getState().saveSnapshot(snapshot);
+
+    store.getState().toggleIgnoreRisk("ann-ignore-filter");
+    expect(store.getState().checkDataChanged()).toBe(false);
+    expect(store.getState().checkFilterChanged()).toBe(true);
+    expect(store.getState().isSnapshotStale()).toBe(true);
+  });
+
+  it("isSnapshotStale combines data and filter changes", async () => {
+    const { useStore } = await import("@/store/useStore");
+    const store = useStore;
+    store.getState().importJob(baseJob);
+    store.getState().addAnnotation({
+      id: "ann-1",
+      timestamp: 1000,
+      position: [0, 0, 0],
+      riskLevel: "danger",
+      text: "test",
+      ignored: false,
+      createdAt: new Date().toISOString(),
+    });
+    const snapshot = store.getState().createExportSnapshot("test");
+    store.getState().saveSnapshot(snapshot);
+    expect(store.getState().isSnapshotStale()).toBe(false);
+
+    store.getState().addAnnotation({
+      id: "ann-2",
+      timestamp: 2000,
+      position: [0, 0, 0],
+      riskLevel: "warning",
+      text: "new",
+      ignored: false,
+      createdAt: new Date().toISOString(),
+    });
+    expect(store.getState().isSnapshotStale()).toBe(true);
+
+    store.getState().updateCurrentSnapshot();
+    expect(store.getState().isSnapshotStale()).toBe(false);
+
+    store.getState().setRiskLevelFilter({ danger: false });
+    expect(store.getState().isSnapshotStale()).toBe(true);
+  });
+});
+
+describe("template source name persistence - templateSourceName", () => {
+  const baseJob = makeValidJob();
+  const defaultCamera = {
+    position: [0, 80, 0.1] as [number, number, number],
+    target: [0, 0, 0] as [number, number, number],
+  };
+  const allLevels: RiskLevelFilter = { safe: true, warning: true, danger: true };
+
+  beforeEach(async () => {
+    const { useStore } = await import("@/store/useStore");
+    useStore.setState({
+      job: null,
+      currentTime: 0,
+      annotations: [],
+      ignoredRiskIds: [],
+      showIgnored: true,
+      riskLevelFilter: allLevels,
+      camera: defaultCamera,
+      snapshots: {},
+      currentSnapshotId: null,
+      currentJobId: null,
+      snapshotHistory: [],
+      cameraPresets: [],
+      lastImportSuccess: null,
+      lastImportFailure: null,
+      templates: [],
+    });
+  });
+
+  it("templateSourceName is stored on annotation when applying template", async () => {
+    const { useStore } = await import("@/store/useStore");
+    const store = useStore;
+    const tpl: TplType = {
+      id: "tpl-name",
+      name: "越界检测",
+      defaultRiskLevel: "danger",
+      defaultText: "吊臂越界",
+      createdAt: new Date().toISOString(),
+    };
+    store.getState().addTemplate(tpl);
+    store.getState().importJob(baseJob);
+
+    store.getState().addAnnotation({
+      id: "ann-name",
+      timestamp: 1000,
+      position: [0, 0, 0],
+      riskLevel: "danger",
+      text: "吊臂越界",
+      ignored: false,
+      createdAt: new Date().toISOString(),
+      templateSourceId: "tpl-name",
+      templateSourceName: "越界检测",
+    });
+
+    const ann = store.getState().annotations.find((a) => a.id === "ann-name");
+    expect(ann).toBeDefined();
+    expect(ann!.templateSourceId).toBe("tpl-name");
+    expect(ann!.templateSourceName).toBe("越界检测");
+  });
+
+  it("templateSourceName survives template deletion in export", async () => {
+    const { useStore } = await import("@/store/useStore");
+    const store = useStore;
+    const tpl: TplType = {
+      id: "tpl-del-name",
+      name: "删除模板名称测试",
+      defaultRiskLevel: "danger",
+      defaultText: "测试",
+      createdAt: new Date().toISOString(),
+    };
+    store.getState().addTemplate(tpl);
+    store.getState().importJob(baseJob);
+    store.getState().addAnnotation({
+      id: "ann-del-name",
+      timestamp: 1000,
+      position: [0, 0, 0],
+      riskLevel: "danger",
+      text: "测试",
+      ignored: false,
+      createdAt: new Date().toISOString(),
+      templateSourceId: "tpl-del-name",
+      templateSourceName: "删除模板名称测试",
+    });
+
+    const snapshot = store.getState().createExportSnapshot("名称持久化");
+    store.getState().saveSnapshot(snapshot);
+
+    store.getState().deleteTemplate("tpl-del-name");
+
+    const json = exportToJSONFromSnapshot(store.getState().getCurrentSnapshot()!, []);
+    const parsed = JSON.parse(json);
+    expect(parsed.annotations[0].templateSourceId).toBe("tpl-del-name");
+    expect(parsed.annotations[0].templateName).toBe("删除模板名称测试");
+
+    const csv = exportToCSVFromSnapshot(store.getState().getCurrentSnapshot()!, []);
+    const dataLine = csv.split("\n").find((l) => l.startsWith("ann-del-name"));
+    expect(dataLine).toContain("删除模板名称测试");
+  });
+
+  it("templateSourceName survives snapshot update and undo", async () => {
+    const { useStore } = await import("@/store/useStore");
+    const store = useStore;
+    const tpl: TplType = {
+      id: "tpl-undo-name",
+      name: "撤销名称测试",
+      defaultRiskLevel: "warning",
+      defaultText: "撤销测试",
+      createdAt: new Date().toISOString(),
+    };
+    store.getState().addTemplate(tpl);
+    store.getState().importJob(baseJob);
+    store.getState().addAnnotation({
+      id: "ann-undo-name",
+      timestamp: 1000,
+      position: [0, 0, 0],
+      riskLevel: "warning",
+      text: "撤销测试",
+      ignored: false,
+      createdAt: new Date().toISOString(),
+      templateSourceId: "tpl-undo-name",
+      templateSourceName: "撤销名称测试",
+    });
+
+    const snapshot = store.getState().createExportSnapshot("撤销名称");
+    store.getState().saveSnapshot(snapshot);
+
+    store.getState().addAnnotation({
+      id: "ann-extra",
+      timestamp: 2000,
+      position: [0, 0, 0],
+      riskLevel: "safe",
+      text: "额外批注",
+      ignored: false,
+      createdAt: new Date().toISOString(),
+    });
+    store.getState().updateCurrentSnapshot();
+
+    store.getState().undoLastSnapshotChange();
+    const restored = store.getState().getCurrentSnapshot()!;
+    const json = exportToJSONFromSnapshot(restored, []);
+    const parsed = JSON.parse(json);
+    expect(parsed.annotations[0].templateSourceId).toBe("tpl-undo-name");
+    expect(parsed.annotations[0].templateName).toBe("撤销名称测试");
+  });
+
+  it("templateSourceName is preserved in persist partialize", async () => {
+    const { useStore } = await import("@/store/useStore");
+    const store = useStore;
+    store.getState().importJob(baseJob);
+    store.getState().addAnnotation({
+      id: "ann-persist-name",
+      timestamp: 1000,
+      position: [0, 0, 0],
+      riskLevel: "danger",
+      text: "持久化名称",
+      ignored: false,
+      createdAt: new Date().toISOString(),
+      templateSourceId: "tpl-persist",
+      templateSourceName: "持久化模板名",
+    });
+
+    const persistConfig = (store as any).persist?.options;
+    if (persistConfig?.partialize) {
+      const partialized = persistConfig.partialize(store.getState());
+      expect(partialized.annotations[0].templateSourceName).toBe("持久化模板名");
+    }
+  });
+
+  it("templateSourceName survives cross-restart rehydration", async () => {
+    const { useStore } = await import("@/store/useStore");
+    const store = useStore;
+    store.getState().importJob(baseJob);
+    store.getState().addAnnotation({
+      id: "ann-restart-name",
+      timestamp: 1000,
+      position: [0, 0, 0],
+      riskLevel: "danger",
+      text: "重启名称",
+      ignored: false,
+      createdAt: new Date().toISOString(),
+      templateSourceId: "tpl-restart",
+      templateSourceName: "重启模板名",
+    });
+    const snapshot = store.getState().createExportSnapshot("重启测试");
+    store.getState().saveSnapshot(snapshot);
+
+    const stateBefore = store.getState();
+    const persisted = {
+      job: stateBefore.job,
+      cameraPresets: stateBefore.cameraPresets,
+      camera: stateBefore.camera,
+      annotations: stateBefore.annotations,
+      ignoredRiskIds: stateBefore.ignoredRiskIds,
+      showIgnored: stateBefore.showIgnored,
+      riskLevelFilter: stateBefore.riskLevelFilter,
+      lastImportSuccess: stateBefore.lastImportSuccess,
+      lastImportFailure: stateBefore.lastImportFailure,
+      snapshots: stateBefore.snapshots,
+      currentSnapshotId: stateBefore.currentSnapshotId,
+      currentJobId: stateBefore.currentJobId,
+      snapshotHistory: stateBefore.snapshotHistory,
+      templates: stateBefore.templates,
+    };
+
+    store.setState({
+      ...persisted,
+      isPlaying: false,
+      playbackSpeed: 1,
+      errors: [],
+      rightPanelOpen: true,
+    });
+
+    const stateAfter = store.getState();
+    expect(stateAfter.annotations[0].templateSourceName).toBe("重启模板名");
+    const restoredSnapshot = stateAfter.getCurrentSnapshot();
+    expect(restoredSnapshot).not.toBeNull();
+    expect(restoredSnapshot!.annotations[0].templateSourceName).toBe("重启模板名");
+  });
+});
+
+describe("filter consistency - list, stats, export alignment", () => {
+  const baseJob = makeValidJob();
+  const defaultCamera = {
+    position: [0, 80, 0.1] as [number, number, number],
+    target: [0, 0, 0] as [number, number, number],
+  };
+  const allLevels: RiskLevelFilter = { safe: true, warning: true, danger: true };
+
+  it("filter hiding annotation: list, stats, and export all agree", () => {
+    const annotations = [
+      ...makeAnnotations(2, "danger", 0),
+      ...makeAnnotations(3, "warning", 2),
+      ...makeAnnotations(1, "safe", 5),
+    ];
+    const dangerOnly: RiskLevelFilter = { safe: false, warning: false, danger: true };
+    const ignoredRiskIds: string[] = [];
+
+    const filtered = getFilteredAnnotations(annotations, ignoredRiskIds, true, dangerOnly);
+    expect(filtered).toHaveLength(2);
+
+    const stats = computeRiskStats(annotations, ignoredRiskIds, true, dangerOnly);
+    expect(stats.visible).toBe(2);
+    expect(stats.exported).toBe(2);
+
+    const snapshot = createSnapshot(
+      baseJob, annotations, 1000, defaultCamera, true, dangerOnly, ignoredRiskIds, "一致性测试"
+    );
+    expect(snapshot.annotations).toHaveLength(2);
+    expect(snapshot.riskStats.visible).toBe(2);
+    expect(snapshot.riskStats.exported).toBe(2);
+
+    const json = exportToJSONFromSnapshot(snapshot);
+    const parsed = JSON.parse(json);
+    expect(parsed.annotations).toHaveLength(2);
+    expect(parsed.riskStats.exported).toBe(2);
+
+    const csv = exportToCSVFromSnapshot(snapshot);
+    const annRows = csv.split("\n").filter((l) => l.startsWith("ann-"));
+    expect(annRows).toHaveLength(2);
+  });
+
+  it("showIgnored=false hides ignored in list, stats, and export consistently", () => {
+    const annotations = makeAnnotations(4, "danger", 0);
+    const ignoredRiskIds = ["ann-1", "ann-3"];
+    const filter: RiskLevelFilter = { safe: true, warning: true, danger: true };
+
+    const filtered = getFilteredAnnotations(annotations, ignoredRiskIds, false, filter);
+    expect(filtered).toHaveLength(2);
+
+    const stats = computeRiskStats(annotations, ignoredRiskIds, false, filter);
+    expect(stats.visible).toBe(2);
+    expect(stats.exported).toBe(2);
+    expect(stats.ignored).toBe(2);
+
+    const snapshot = createSnapshot(
+      baseJob, annotations, 1000, defaultCamera, false, filter, ignoredRiskIds, "忽略一致性"
+    );
+    expect(snapshot.annotations).toHaveLength(2);
+    expect(snapshot.riskStats.exported).toBe(2);
+
+    const json = exportToJSONFromSnapshot(snapshot);
+    const parsed = JSON.parse(json);
+    expect(parsed.annotations).toHaveLength(2);
+    expect(parsed.riskStats.exported).toBe(2);
+    expect(parsed.riskStats.ignored).toBe(2);
+
+    const csv = exportToCSVFromSnapshot(snapshot);
+    const annRows = csv.split("\n").filter((l) => l.startsWith("ann-"));
+    expect(annRows).toHaveLength(2);
+  });
+
+  it("combined filter: showIgnored=false + danger-only agrees everywhere", () => {
+    const annotations = [
+      ...makeAnnotations(2, "danger", 0),
+      ...makeAnnotations(3, "warning", 2),
+    ];
+    const ignoredRiskIds = ["ann-0"];
+    const dangerOnly: RiskLevelFilter = { safe: false, warning: false, danger: true };
+
+    const filtered = getFilteredAnnotations(annotations, ignoredRiskIds, false, dangerOnly);
+    expect(filtered).toHaveLength(1);
+    expect(filtered[0].id).toBe("ann-1");
+
+    const stats = computeRiskStats(annotations, ignoredRiskIds, false, dangerOnly);
+    expect(stats.visible).toBe(1);
+    expect(stats.exported).toBe(1);
+
+    const snapshot = createSnapshot(
+      baseJob, annotations, 1000, defaultCamera, false, dangerOnly, ignoredRiskIds, "组合筛选"
+    );
+    expect(snapshot.annotations).toHaveLength(1);
+    expect(snapshot.riskStats.exported).toBe(1);
+
+    const json = exportToJSONFromSnapshot(snapshot);
+    const parsed = JSON.parse(json);
+    expect(parsed.annotations).toHaveLength(1);
+    expect(parsed.annotations[0].id).toBe("ann-1");
+
+    const csv = exportToCSVFromSnapshot(snapshot);
+    const annRows = csv.split("\n").filter((l) => l.startsWith("ann-"));
+    expect(annRows).toHaveLength(1);
+    expect(annRows[0]).toContain("ann-1");
+  });
+});
+
+describe("conflict scenario - stale export prevention", () => {
+  const baseJob = makeValidJob();
+  const defaultCamera = {
+    position: [0, 80, 0.1] as [number, number, number],
+    target: [0, 0, 0] as [number, number, number],
+  };
+  const allLevels: RiskLevelFilter = { safe: true, warning: true, danger: true };
+
+  beforeEach(async () => {
+    const { useStore } = await import("@/store/useStore");
+    useStore.setState({
+      job: null,
+      currentTime: 0,
+      annotations: [],
+      ignoredRiskIds: [],
+      showIgnored: true,
+      riskLevelFilter: allLevels,
+      camera: defaultCamera,
+      snapshots: {},
+      currentSnapshotId: null,
+      currentJobId: null,
+      snapshotHistory: [],
+      cameraPresets: [],
+      lastImportSuccess: null,
+      lastImportFailure: null,
+      templates: [],
+    });
+  });
+
+  it("stale snapshot export shows different data than current state", async () => {
+    const { useStore } = await import("@/store/useStore");
+    const store = useStore;
+    store.getState().importJob(baseJob);
+    store.getState().addAnnotation({
+      id: "ann-old",
+      timestamp: 1000,
+      position: [0, 0, 0],
+      riskLevel: "warning",
+      text: "旧批注",
+      ignored: false,
+      createdAt: new Date().toISOString(),
+    });
+
+    const snapshot = store.getState().createExportSnapshot("旧快照");
+    store.getState().saveSnapshot(snapshot);
+
+    store.getState().addAnnotation({
+      id: "ann-new",
+      timestamp: 2000,
+      position: [0, 0, 0],
+      riskLevel: "danger",
+      text: "新批注",
+      ignored: false,
+      createdAt: new Date().toISOString(),
+    });
+
+    expect(store.getState().isSnapshotStale()).toBe(true);
+
+    const staleSnapshot = store.getState().getCurrentSnapshot()!;
+    expect(staleSnapshot.annotations).toHaveLength(1);
+    const json = exportToJSONFromSnapshot(staleSnapshot);
+    const parsed = JSON.parse(json);
+    expect(parsed.annotations).toHaveLength(1);
+    expect(parsed.annotations[0].id).toBe("ann-old");
+
+    expect(store.getState().annotations).toHaveLength(2);
+  });
+
+  it("updating stale snapshot resolves staleness and export aligns", async () => {
+    const { useStore } = await import("@/store/useStore");
+    const store = useStore;
+    store.getState().importJob(baseJob);
+    store.getState().addAnnotation({
+      id: "ann-1",
+      timestamp: 1000,
+      position: [0, 0, 0],
+      riskLevel: "warning",
+      text: "批注1",
+      ignored: false,
+      createdAt: new Date().toISOString(),
+    });
+    const snapshot = store.getState().createExportSnapshot("过期测试");
+    store.getState().saveSnapshot(snapshot);
+
+    store.getState().updateAnnotation("ann-1", { riskLevel: "danger" });
+    store.getState().addAnnotation({
+      id: "ann-2",
+      timestamp: 2000,
+      position: [0, 0, 0],
+      riskLevel: "safe",
+      text: "批注2",
+      ignored: false,
+      createdAt: new Date().toISOString(),
+    });
+
+    expect(store.getState().isSnapshotStale()).toBe(true);
+
+    store.getState().updateCurrentSnapshot();
+    expect(store.getState().isSnapshotStale()).toBe(false);
+
+    const updatedSnap = store.getState().getCurrentSnapshot()!;
+    expect(updatedSnap.annotations).toHaveLength(2);
+    expect(updatedSnap.riskStats.danger).toBe(1);
+    expect(updatedSnap.riskStats.safe).toBe(1);
+
+    const json = exportToJSONFromSnapshot(updatedSnap);
+    const parsed = JSON.parse(json);
+    expect(parsed.annotations).toHaveLength(2);
+    expect(parsed.riskStats.danger).toBe(1);
+    expect(parsed.riskStats.safe).toBe(1);
+  });
+
+  it("filter change makes snapshot stale but export still uses snapshot filter", async () => {
+    const { useStore } = await import("@/store/useStore");
+    const store = useStore;
+    store.getState().importJob(baseJob);
+    store.getState().addAnnotation({
+      id: "ann-danger",
+      timestamp: 1000,
+      position: [0, 0, 0],
+      riskLevel: "danger",
+      text: "危险",
+      ignored: false,
+      createdAt: new Date().toISOString(),
+    });
+    store.getState().addAnnotation({
+      id: "ann-safe",
+      timestamp: 2000,
+      position: [0, 0, 0],
+      riskLevel: "safe",
+      text: "安全",
+      ignored: false,
+      createdAt: new Date().toISOString(),
+    });
+
+    const snapshot = store.getState().createExportSnapshot("筛选变更");
+    store.getState().saveSnapshot(snapshot);
+    expect(snapshot.annotations).toHaveLength(2);
+
+    store.getState().setRiskLevelFilter({ safe: false });
+    expect(store.getState().isSnapshotStale()).toBe(true);
+
+    const staleSnap = store.getState().getCurrentSnapshot()!;
+    const json = exportToJSONFromSnapshot(staleSnap);
+    const parsed = JSON.parse(json);
+    expect(parsed.annotations).toHaveLength(2);
+
+    store.getState().updateCurrentSnapshot();
+    const updatedSnap = store.getState().getCurrentSnapshot()!;
+    expect(updatedSnap.annotations).toHaveLength(1);
+    expect(updatedSnap.annotations[0].id).toBe("ann-danger");
+  });
+});
+
+describe("template name dedup - delete does not affect existing annotations", () => {
+  const baseJob = makeValidJob();
+  const allLevels: RiskLevelFilter = { safe: true, warning: true, danger: true };
+  const defaultCamera = {
+    position: [0, 80, 0.1] as [number, number, number],
+    target: [0, 0, 0] as [number, number, number],
+  };
+
+  beforeEach(async () => {
+    const { useStore } = await import("@/store/useStore");
+    useStore.setState({
+      job: null,
+      currentTime: 0,
+      annotations: [],
+      ignoredRiskIds: [],
+      showIgnored: true,
+      riskLevelFilter: allLevels,
+      camera: defaultCamera,
+      snapshots: {},
+      currentSnapshotId: null,
+      currentJobId: null,
+      snapshotHistory: [],
+      cameraPresets: [],
+      lastImportSuccess: null,
+      lastImportFailure: null,
+      templates: [],
+    });
+  });
+
+  it("addTemplate rejects duplicate name even with different IDs", async () => {
+    const { useStore } = await import("@/store/useStore");
+    const store = useStore;
+    const tpl1: TplType = {
+      id: "tpl-dup-1",
+      name: "重复名称",
+      defaultRiskLevel: "danger",
+      defaultText: "a",
+      createdAt: new Date().toISOString(),
+    };
+    store.getState().addTemplate(tpl1);
+    const tpl2: TplType = {
+      id: "tpl-dup-2",
+      name: "重复名称",
+      defaultRiskLevel: "warning",
+      defaultText: "b",
+      createdAt: new Date().toISOString(),
+    };
+    expect(store.getState().addTemplate(tpl2)).toBe(false);
+    expect(store.getState().templates).toHaveLength(1);
+  });
+
+  it("updateTemplate to existing name is rejected", async () => {
+    const { useStore } = await import("@/store/useStore");
+    const store = useStore;
+    const tpl1: TplType = {
+      id: "tpl-a",
+      name: "名称A",
+      defaultRiskLevel: "danger",
+      defaultText: "a",
+      createdAt: new Date().toISOString(),
+    };
+    const tpl2: TplType = {
+      id: "tpl-b",
+      name: "名称B",
+      defaultRiskLevel: "warning",
+      defaultText: "b",
+      createdAt: new Date().toISOString(),
+    };
+    store.getState().addTemplate(tpl1);
+    store.getState().addTemplate(tpl2);
+    expect(store.getState().updateTemplate("tpl-b", { name: "名称A" })).toBe(false);
+    expect(store.getState().templates[1].name).toBe("名称B");
+  });
+
+  it("deleting template does not change existing annotations or snapshot data", async () => {
+    const { useStore } = await import("@/store/useStore");
+    const store = useStore;
+    const tpl: TplType = {
+      id: "tpl-del",
+      name: "待删模板",
+      defaultRiskLevel: "danger",
+      defaultText: "删除测试",
+      createdAt: new Date().toISOString(),
+    };
+    store.getState().addTemplate(tpl);
+    store.getState().importJob(baseJob);
+    store.getState().addAnnotation({
+      id: "ann-from-tpl",
+      timestamp: 1000,
+      position: [0, 0, 0],
+      riskLevel: "danger",
+      text: "删除测试",
+      ignored: false,
+      createdAt: new Date().toISOString(),
+      templateSourceId: "tpl-del",
+      templateSourceName: "待删模板",
+    });
+    const snapshot = store.getState().createExportSnapshot("删模板前");
+    store.getState().saveSnapshot(snapshot);
+
+    store.getState().deleteTemplate("tpl-del");
+
+    expect(store.getState().annotations).toHaveLength(1);
+    expect(store.getState().annotations[0].templateSourceId).toBe("tpl-del");
+    expect(store.getState().annotations[0].templateSourceName).toBe("待删模板");
+
+    const snapAfter = store.getState().getCurrentSnapshot()!;
+    expect(snapAfter.annotations[0].templateSourceId).toBe("tpl-del");
+    expect(snapAfter.annotations[0].templateSourceName).toBe("待删模板");
+
+    const json = exportToJSONFromSnapshot(snapAfter, []);
+    const parsed = JSON.parse(json);
+    expect(parsed.annotations[0].templateSourceId).toBe("tpl-del");
+    expect(parsed.annotations[0].templateName).toBe("待删模板");
+  });
+});
+
+describe("resolveTemplateName - annotation.templateSourceName takes priority", () => {
+  const baseJob = makeValidJob();
+  const defaultCamera = {
+    position: [0, 80, 0.1] as [number, number, number],
+    target: [0, 0, 0] as [number, number, number],
+  };
+
+  it("uses templateSourceName when template is deleted", () => {
+    const annotations: Annotation[] = [
+      {
+        id: "ann-name-test",
+        timestamp: 1000,
+        position: [0, 0, 0],
+        riskLevel: "danger",
+        text: "test",
+        ignored: false,
+        createdAt: new Date().toISOString(),
+        templateSourceId: "tpl-deleted",
+        templateSourceName: "已删除模板名",
+      },
+    ];
+    const snapshot = createSnapshot(
+      baseJob, annotations, 1000, defaultCamera, true,
+      { safe: true, warning: true, danger: true }, [], "名称优先级"
+    );
+
+    const json = exportToJSONFromSnapshot(snapshot, []);
+    const parsed = JSON.parse(json);
+    expect(parsed.annotations[0].templateSourceId).toBe("tpl-deleted");
+    expect(parsed.annotations[0].templateName).toBe("已删除模板名");
+
+    const csv = exportToCSVFromSnapshot(snapshot, []);
+    const dataLine = csv.split("\n").find((l) => l.startsWith("ann-name-test"));
+    expect(dataLine).toContain("已删除模板名");
+  });
+
+  it("prefers templateSourceName over template map lookup", () => {
+    const tpl: TplType = {
+      id: "tpl-override",
+      name: "当前模板名",
+      defaultRiskLevel: "warning",
+      defaultText: "test",
+      createdAt: new Date().toISOString(),
+    };
+    const annotations: Annotation[] = [
+      {
+        id: "ann-override",
+        timestamp: 1000,
+        position: [0, 0, 0],
+        riskLevel: "warning",
+        text: "test",
+        ignored: false,
+        createdAt: new Date().toISOString(),
+        templateSourceId: "tpl-override",
+        templateSourceName: "原始模板名",
+      },
+    ];
+    const snapshot = createSnapshot(
+      baseJob, annotations, 1000, defaultCamera, true,
+      { safe: true, warning: true, danger: true }, [], "覆盖测试"
+    );
+
+    const json = exportToJSONFromSnapshot(snapshot, [tpl]);
+    const parsed = JSON.parse(json);
+    expect(parsed.annotations[0].templateName).toBe("原始模板名");
+  });
+
+  it("falls back to template map when templateSourceName is absent", () => {
+    const tpl: TplType = {
+      id: "tpl-fallback",
+      name: "回退模板名",
+      defaultRiskLevel: "danger",
+      defaultText: "test",
+      createdAt: new Date().toISOString(),
+    };
+    const annotations: Annotation[] = [
+      {
+        id: "ann-fallback",
+        timestamp: 1000,
+        position: [0, 0, 0],
+        riskLevel: "danger",
+        text: "test",
+        ignored: false,
+        createdAt: new Date().toISOString(),
+        templateSourceId: "tpl-fallback",
+      },
+    ];
+    const snapshot = createSnapshot(
+      baseJob, annotations, 1000, defaultCamera, true,
+      { safe: true, warning: true, danger: true }, [], "回退测试"
+    );
+
+    const json = exportToJSONFromSnapshot(snapshot, [tpl]);
+    const parsed = JSON.parse(json);
+    expect(parsed.annotations[0].templateName).toBe("回退模板名");
+  });
+
+  it("returns null templateName when both templateSourceName and template map miss", () => {
+    const annotations: Annotation[] = [
+      {
+        id: "ann-missing",
+        timestamp: 1000,
+        position: [0, 0, 0],
+        riskLevel: "danger",
+        text: "test",
+        ignored: false,
+        createdAt: new Date().toISOString(),
+        templateSourceId: "tpl-nonexistent",
+      },
+    ];
+    const snapshot = createSnapshot(
+      baseJob, annotations, 1000, defaultCamera, true,
+      { safe: true, warning: true, danger: true }, [], "缺失测试"
+    );
+
+    const json = exportToJSONFromSnapshot(snapshot, []);
+    const parsed = JSON.parse(json);
+    expect(parsed.annotations[0].templateSourceId).toBe("tpl-nonexistent");
+    expect(parsed.annotations[0].templateName).toBeNull();
   });
 });

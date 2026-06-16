@@ -11,6 +11,7 @@ import {
   MessageSquare,
   BookTemplate,
   Copy,
+  AlertTriangle,
 } from "lucide-react";
 import { useStore } from "@/store/useStore";
 import type { AnnotationTemplate } from "@/types";
@@ -35,6 +36,10 @@ export default function AnnotationPanel() {
   const updateTemplate = useStore((s) => s.updateTemplate);
   const deleteTemplate = useStore((s) => s.deleteTemplate);
   const hasTemplateName = useStore((s) => s.hasTemplateName);
+  const isSnapshotStale = useStore((s) => s.isSnapshotStale());
+  const currentSnapshotId = useStore((s) => s.currentSnapshotId);
+  const updateCurrentSnapshot = useStore((s) => s.updateCurrentSnapshot);
+  const undoLastSnapshotChange = useStore((s) => s.undoLastSnapshotChange);
 
   const [isAdding, setIsAdding] = useState(false);
   const [newText, setNewText] = useState("");
@@ -106,6 +111,7 @@ export default function AnnotationPanel() {
         ignored: false,
         createdAt: new Date().toISOString(),
         templateSourceId: tpl.id,
+        templateSourceName: tpl.name,
       });
     },
     [currentTime, job, addAnnotation]
@@ -254,6 +260,32 @@ export default function AnnotationPanel() {
               </button>
             </div>
           </div>
+
+          {currentSnapshotId && isSnapshotStale && (
+            <div className="p-2 border-b border-amber-500/30 bg-amber-500/10 flex-shrink-0">
+              <div className="flex items-start gap-1.5">
+                <AlertTriangle size={12} className="text-amber-400 mt-0.5 flex-shrink-0" />
+                <div className="flex-1">
+                  <div className="text-[10px] text-amber-300 font-medium">快照已过期</div>
+                  <div className="text-[9px] text-amber-400/80">批注或筛选已变更，导出数据可能与当前不一致</div>
+                  <div className="flex gap-1.5 mt-1">
+                    <button
+                      onClick={() => updateCurrentSnapshot()}
+                      className="px-1.5 py-0.5 rounded bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 text-[9px] border border-amber-500/30 transition-colors"
+                    >
+                      更新快照
+                    </button>
+                    <button
+                      onClick={() => undoLastSnapshotChange()}
+                      className="px-1.5 py-0.5 rounded bg-[#162844] hover:bg-[#1E3A5F] text-[#8BA4C7] text-[9px] border border-[#1E3A5F]/60 transition-colors"
+                    >
+                      撤销
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
 
           <div className="flex border-b border-[#1E3A5F]/60 flex-shrink-0">
             <button
@@ -504,12 +536,12 @@ export default function AnnotationPanel() {
                       <span className="text-[10px] text-[#3D5A7A] font-mono">
                         {formatTimestamp(ann.timestamp)}
                       </span>
-                      {ann.templateSourceId && templateMap.has(ann.templateSourceId) && (
+                      {ann.templateSourceId && (templateMap.has(ann.templateSourceId) || ann.templateSourceName) && (
                         <span className="text-[9px] px-1 py-0.5 rounded bg-cyan-500/10 text-cyan-400 border border-cyan-500/20">
-                          模板: {templateMap.get(ann.templateSourceId)!.name}
+                          模板: {ann.templateSourceName || templateMap.get(ann.templateSourceId)!.name}
                         </span>
                       )}
-                      {ann.templateSourceId && !templateMap.has(ann.templateSourceId) && (
+                      {ann.templateSourceId && !templateMap.has(ann.templateSourceId) && !ann.templateSourceName && (
                         <span className="text-[9px] px-1 py-0.5 rounded bg-[#1E3A5F]/40 text-[#5A7A9E] border border-[#1E3A5F]/30">
                           模板已删
                         </span>

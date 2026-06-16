@@ -13,6 +13,7 @@ import {
   Eye,
   RefreshCw,
   CheckCircle2,
+  ShieldAlert,
 } from "lucide-react";
 import { useStore } from "@/store/useStore";
 import {
@@ -27,7 +28,6 @@ export default function ExportPanel() {
   const [showPreview, setShowPreview] = useState(false);
   const [showNameDialog, setShowNameDialog] = useState(false);
   const [snapshotName, setSnapshotName] = useState("");
-  const [showWarning, setShowWarning] = useState(false);
 
   const job = useStore((s) => s.job);
   const annotations = useStore((s) => s.annotations);
@@ -44,6 +44,8 @@ export default function ExportPanel() {
   const filterRiskLevelFilter = useStore((s) => s.riskLevelFilter);
   const filterIgnoredRiskIds = useStore((s) => s.ignoredRiskIds);
   const templates = useStore((s) => s.templates);
+  const checkDataChanged = useStore((s) => s.checkDataChanged);
+  const isSnapshotStaleFn = useStore((s) => s.isSnapshotStale);
 
   const templateMap = useMemo(() => {
     const map = new Map<string, AnnotationTemplate>();
@@ -85,20 +87,20 @@ export default function ExportPanel() {
     );
   }, [currentSnapshot, filterShowIgnored, filterRiskLevelFilter, filterIgnoredRiskIds]);
 
+  const dataChanged = useMemo(() => {
+    return checkDataChanged();
+  }, [checkDataChanged, annotations, currentSnapshot]);
+
+  const isStale = useMemo(() => {
+    return isSnapshotStaleFn();
+  }, [isSnapshotStaleFn, annotations, currentSnapshot, filterShowIgnored, filterRiskLevelFilter, filterIgnoredRiskIds]);
+
   const createExportSnapshot = useStore((s) => s.createExportSnapshot);
   const saveSnapshot = useStore((s) => s.saveSnapshot);
   const updateCurrentSnapshot = useStore((s) => s.updateCurrentSnapshot);
   const setCurrentSnapshot = useStore((s) => s.setCurrentSnapshot);
   const deleteSnapshot = useStore((s) => s.deleteSnapshot);
   const undoLastSnapshotChange = useStore((s) => s.undoLastSnapshotChange);
-
-  useEffect(() => {
-    if (currentSnapshot && filterChanged) {
-      setShowWarning(true);
-    } else {
-      setShowWarning(false);
-    }
-  }, [filterChanged, currentSnapshot]);
 
   const visibleCount = useMemo(() => {
     return annotations.filter((a) => {
@@ -129,17 +131,11 @@ export default function ExportPanel() {
 
   const handleUpdateSnapshot = useCallback(() => {
     if (!currentSnapshot) return;
-    if (filterChanged) {
-      const confirmed = window.confirm(
-        "筛选条件已变更，覆盖更新将使用当前筛选条件，是否继续？"
-      );
-      if (!confirmed) return;
-    }
     const result = updateCurrentSnapshot();
     if (!result.success) {
       alert("更新快照失败");
     }
-  }, [currentSnapshot, filterChanged, updateCurrentSnapshot]);
+  }, [currentSnapshot, updateCurrentSnapshot]);
 
   const handleUndo = useCallback(() => {
     const result = undoLastSnapshotChange();
@@ -153,9 +149,12 @@ export default function ExportPanel() {
       alert("请先创建或选择一个快照");
       return;
     }
-    if (filterChanged) {
+    if (isStale) {
+      const reason = dataChanged
+        ? "批注数据已变更"
+        : "筛选条件已变更";
       const confirmed = window.confirm(
-        "筛选条件已变更，导出将使用快照中的筛选条件。\n\n建议重新生成快照后再导出。\n\n是否继续导出？"
+        `快照已过期（${reason}），导出将使用快照中的旧数据。\n\n强烈建议先更新快照再导出，避免旧结果被误用。\n\n仍要继续导出吗？`
       );
       if (!confirmed) return;
     }
@@ -166,16 +165,19 @@ export default function ExportPanel() {
       `吊装复盘_${currentSnapshot.jobMeta.name}_${currentSnapshot.name}_${date}.json`,
       "application/json"
     );
-  }, [currentSnapshot, filterChanged, templates]);
+  }, [currentSnapshot, isStale, dataChanged, templates]);
 
   const handleExportCSV = useCallback(() => {
     if (!currentSnapshot) {
       alert("请先创建或选择一个快照");
       return;
     }
-    if (filterChanged) {
+    if (isStale) {
+      const reason = dataChanged
+        ? "批注数据已变更"
+        : "筛选条件已变更";
       const confirmed = window.confirm(
-        "筛选条件已变更，导出将使用快照中的筛选条件。\n\n建议重新生成快照后再导出。\n\n是否继续导出？"
+        `快照已过期（${reason}），导出将使用快照中的旧数据。\n\n强烈建议先更新快照再导出，避免旧结果被误用。\n\n仍要继续导出吗？`
       );
       if (!confirmed) return;
     }
@@ -186,7 +188,7 @@ export default function ExportPanel() {
       `吊装复盘_${currentSnapshot.jobMeta.name}_${currentSnapshot.name}_${date}.csv`,
       "text/csv;charset=utf-8"
     );
-  }, [currentSnapshot, filterChanged, templates]);
+  }, [currentSnapshot, isStale, dataChanged, templates]);
 
   const handleSelectSnapshot = useCallback(
     (snapshot: ExportSnapshot) => {
@@ -215,16 +217,32 @@ export default function ExportPanel() {
     return `${f.showIgnored ? "含已忽略" : "不含已忽略"} | ${levels.join("/")}`;
   };
 
+  const getTemplateName = useCallback(
+    (a: { templateSourceId?: string; templateSourceName?: string }) => {
+      if (!a.templateSourceId) return null;
+      return a.templateSourceName || (templateMap.has(a.templateSourceId) ? templateMap.get(a.templateSourceId)!.name : null);
+    },
+    [templateMap]
+  );
+
   if (!job) return null;
 
   return (
     <div className="relative">
       <button
         onClick={() => setOpen(!open)}
-        className="flex items-center gap-2 px-3 py-2 rounded-lg bg-[#0F1B2D]/90 backdrop-blur border border-[#1E3A5F]/60 text-[#8BA4C7] hover:text-white hover:bg-[#162844] transition-colors text-sm"
+        className={`flex items-center gap-2 px-3 py-2 rounded-lg bg-[#0F1B2D]/90 backdrop-blur border transition-colors text-sm ${
+          isStale && currentSnapshot
+            ? "border-amber-500/60 text-amber-300"
+            : "border-[#1E3A5F]/60 text-[#8BA4C7] hover:text-white hover:bg-[#162844]"
+        }`}
       >
-        <Download size={16} />
-        <span>导出报告</span>
+        {isStale && currentSnapshot ? (
+          <ShieldAlert size={16} className="text-amber-400" />
+        ) : (
+          <Download size={16} />
+        )}
+        <span>{isStale && currentSnapshot ? "快照已过期" : "导出报告"}</span>
         <ChevronDown
           size={12}
           className={`transition-transform ${open ? "rotate-180" : ""}`}
@@ -245,11 +263,45 @@ export default function ExportPanel() {
               </button>
             </div>
 
-            {currentSnapshot && showWarning && (
-              <div className="flex items-start gap-2 p-2 rounded bg-amber-500/10 border border-amber-500/30 mb-2">
-                <AlertTriangle size={14} className="text-amber-400 mt-0.5 flex-shrink-0" />
-                <div className="text-xs text-amber-300">
-                  筛选条件已变更，导出将使用快照中的数据。建议更新快照后再导出。
+            {currentSnapshot && isStale && (
+              <div className="p-2.5 rounded bg-red-500/10 border border-red-500/30 mb-2">
+                <div className="flex items-start gap-2">
+                  <ShieldAlert size={16} className="text-red-400 mt-0.5 flex-shrink-0" />
+                  <div className="flex-1">
+                    <div className="text-xs text-red-300 font-medium mb-0.5">快照已过期</div>
+                    <div className="text-[10px] text-red-400/80 mb-2">
+                      {dataChanged && filterChanged && "批注数据和筛选条件均已变更，"}
+                      {dataChanged && !filterChanged && "批注数据已变更，"}
+                      {!dataChanged && filterChanged && "筛选条件已变更，"}
+                      导出将使用旧数据，结果可能与当前不一致
+                    </div>
+                    <div className="flex gap-2">
+                      <button
+                        onClick={handleUpdateSnapshot}
+                        className="flex items-center gap-1 px-2.5 py-1 rounded bg-cyan-600/80 hover:bg-cyan-500 text-white text-[10px] font-medium transition-colors"
+                      >
+                        <RefreshCw size={10} />
+                        一键更新
+                      </button>
+                      <button
+                        onClick={handleUndo}
+                        disabled={!canUndo}
+                        className="flex items-center gap-1 px-2.5 py-1 rounded bg-[#162844] hover:bg-[#1E3A5F] text-[#8BA4C7] hover:text-white text-[10px] transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                      >
+                        <Undo2 size={10} />
+                        撤销
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {currentSnapshot && !isStale && (
+              <div className="flex items-start gap-2 p-2 rounded bg-green-500/5 border border-green-500/20 mb-2">
+                <CheckCircle2 size={14} className="text-green-400 mt-0.5 flex-shrink-0" />
+                <div className="text-xs text-green-300">
+                  快照数据与当前一致，可安全导出
                 </div>
               </div>
             )}
@@ -262,9 +314,9 @@ export default function ExportPanel() {
                     当前快照：<span className="text-white">{currentSnapshot.name}</span>
                   </span>
                 </div>
-                <div className="grid grid-cols-3 gap-2 text-xs">
+                <div className="grid grid-cols-4 gap-2 text-xs">
                   <div className="p-1.5 rounded bg-[#162844]/50">
-                    <div className="text-[#5A7A9E]">风险</div>
+                    <div className="text-[#5A7A9E]">危险</div>
                     <div className="text-red-400 font-medium">{currentSnapshot.riskStats.danger}</div>
                   </div>
                   <div className="p-1.5 rounded bg-[#162844]/50">
@@ -275,9 +327,13 @@ export default function ExportPanel() {
                     <div className="text-[#5A7A9E]">已忽略</div>
                     <div className="text-[#5A7A9E] font-medium">{currentSnapshot.riskStats.ignored}</div>
                   </div>
+                  <div className="p-1.5 rounded bg-[#162844]/50">
+                    <div className="text-[#5A7A9E]">当前可见</div>
+                    <div className="text-cyan-400 font-medium">{visibleCount}</div>
+                  </div>
                 </div>
                 <div className="text-xs text-[#5A7A9E]">
-                  筛选：{getFilterDescription(currentSnapshot)}
+                  快照筛选：{getFilterDescription(currentSnapshot)}
                 </div>
 
                 <div className="flex gap-2 pt-1">
@@ -351,29 +407,37 @@ export default function ExportPanel() {
 
           {currentSnapshot && showPreview && (
             <div className="border-b border-[#1E3A5F]/60 max-h-64 overflow-y-auto p-3 bg-[#0A1628]">
-              <div className="text-xs text-[#5A7A9E] mb-2">快照数据预览</div>
-              {currentSnapshot.annotations.slice(0, 5).map((a) => (
-                <div key={a.id} className="flex items-start gap-2 py-1.5 border-b border-[#1E3A5F]/30 last:border-0">
-                  <span
-                    className={`inline-block w-2 h-2 rounded-full mt-1.5 flex-shrink-0 ${
-                      a.riskLevel === "danger"
-                        ? "bg-red-500"
-                        : a.riskLevel === "warning"
-                        ? "bg-amber-500"
-                        : "bg-green-500"
-                    }`}
-                  />
-                  <div className="flex-1 min-w-0">
-                    <div className="text-xs text-white truncate">{a.text}</div>
-                    <div className="text-[10px] text-[#5A7A9E]">
-                      {a.timestamp}ms · {a.riskLevel}
-                      {a.ignored && " · 已忽略"}
-                      {a.templateSourceId && templateMap.has(a.templateSourceId) && ` · 模板: ${templateMap.get(a.templateSourceId)!.name}`}
-                      {a.templateSourceId && !templateMap.has(a.templateSourceId) && " · 模板已删"}
+              <div className="text-xs text-[#5A7A9E] mb-2">
+                快照数据预览
+                {isStale && (
+                  <span className="ml-1.5 text-amber-400">(已过期，数据可能不一致)</span>
+                )}
+              </div>
+              {currentSnapshot.annotations.slice(0, 5).map((a) => {
+                const tplName = getTemplateName(a);
+                return (
+                  <div key={a.id} className="flex items-start gap-2 py-1.5 border-b border-[#1E3A5F]/30 last:border-0">
+                    <span
+                      className={`inline-block w-2 h-2 rounded-full mt-1.5 flex-shrink-0 ${
+                        a.riskLevel === "danger"
+                          ? "bg-red-500"
+                          : a.riskLevel === "warning"
+                          ? "bg-amber-500"
+                          : "bg-green-500"
+                      }`}
+                    />
+                    <div className="flex-1 min-w-0">
+                      <div className="text-xs text-white truncate">{a.text}</div>
+                      <div className="text-[10px] text-[#5A7A9E]">
+                        {a.timestamp}ms · {a.riskLevel}
+                        {a.ignored && " · 已忽略"}
+                        {a.templateSourceId && tplName && ` · 模板: ${tplName}`}
+                        {a.templateSourceId && !tplName && " · 模板已删"}
+                      </div>
                     </div>
                   </div>
-                </div>
-              ))}
+                );
+              })}
               {currentSnapshot.annotations.length > 5 && (
                 <div className="text-xs text-[#5A7A9E] text-center pt-1">
                   还有 {currentSnapshot.annotations.length - 5} 条批注...
@@ -386,11 +450,18 @@ export default function ExportPanel() {
             <button
               onClick={handleExportJSON}
               disabled={!currentSnapshot}
-              className="w-full flex items-center gap-3 px-3 py-2.5 rounded hover:bg-[#162844] transition-colors text-left disabled:opacity-40 disabled:cursor-not-allowed"
+              className={`w-full flex items-center gap-3 px-3 py-2.5 rounded hover:bg-[#162844] transition-colors text-left disabled:opacity-40 disabled:cursor-not-allowed ${
+                isStale && currentSnapshot ? "border border-amber-500/30" : ""
+              }`}
             >
-              <FileJson size={18} className="text-cyan-400" />
+              <FileJson size={18} className={isStale && currentSnapshot ? "text-amber-400" : "text-cyan-400"} />
               <div>
-                <div className="text-sm text-white">导出 JSON</div>
+                <div className="text-sm text-white">
+                  导出 JSON
+                  {isStale && currentSnapshot && (
+                    <span className="text-[10px] text-amber-400 ml-1.5">(快照已过期)</span>
+                  )}
+                </div>
                 <div className="text-[10px] text-[#5A7A9E]">
                   完整轨迹数据 + 快照风险批注
                 </div>
@@ -400,11 +471,18 @@ export default function ExportPanel() {
             <button
               onClick={handleExportCSV}
               disabled={!currentSnapshot}
-              className="w-full flex items-center gap-3 px-3 py-2.5 rounded hover:bg-[#162844] transition-colors text-left disabled:opacity-40 disabled:cursor-not-allowed"
+              className={`w-full flex items-center gap-3 px-3 py-2.5 rounded hover:bg-[#162844] transition-colors text-left disabled:opacity-40 disabled:cursor-not-allowed ${
+                isStale && currentSnapshot ? "border border-amber-500/30" : ""
+              }`}
             >
-              <FileSpreadsheet size={18} className="text-green-400" />
+              <FileSpreadsheet size={18} className={isStale && currentSnapshot ? "text-amber-400" : "text-green-400"} />
               <div>
-                <div className="text-sm text-white">导出 CSV</div>
+                <div className="text-sm text-white">
+                  导出 CSV
+                  {isStale && currentSnapshot && (
+                    <span className="text-[10px] text-amber-400 ml-1.5">(快照已过期)</span>
+                  )}
+                </div>
                 <div className="text-[10px] text-[#5A7A9E]">
                   轨迹表格 + 批注表格，可用 Excel 打开
                 </div>
@@ -413,8 +491,13 @@ export default function ExportPanel() {
           </div>
 
           {currentSnapshot && (
-            <div className="px-3 py-2 border-t border-[#1E3A5F]/60 text-[10px] text-[#3D5A7A]">
-              导出内容基于快照数据，与创建快照时的筛选条件一致
+            <div className={`px-3 py-2 border-t text-[10px] ${
+              isStale ? "border-t-amber-500/30 text-amber-400/80 bg-amber-500/5" : "border-t-[#1E3A5F]/60 text-[#3D5A7A]"
+            }`}>
+              {isStale
+                ? "快照已过期，导出将使用旧数据。建议先更新快照再导出。"
+                : "导出内容基于快照数据，与创建快照时的筛选条件一致"
+              }
             </div>
           )}
           {!currentSnapshot && (
