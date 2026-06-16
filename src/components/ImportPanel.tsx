@@ -1,7 +1,6 @@
 import { useState, useRef, useCallback } from "react";
-import { Upload, FileJson, AlertTriangle, CheckCircle, Database } from "lucide-react";
+import { Upload, FileJson, AlertTriangle, CheckCircle, Database, Clock, XCircle } from "lucide-react";
 import { useStore } from "@/store/useStore";
-import { validateJob } from "@/utils/validation";
 import { sampleJob } from "@/data/sampleJob";
 
 export default function ImportPanel() {
@@ -11,18 +10,15 @@ export default function ImportPanel() {
 
   const job = useStore((s) => s.job);
   const errors = useStore((s) => s.errors);
-  const setJob = useStore((s) => s.setJob);
-  const addErrors = useStore((s) => s.addErrors);
+  const importJob = useStore((s) => s.importJob);
+  const lastImportSuccess = useStore((s) => s.lastImportSuccess);
+  const lastImportFailure = useStore((s) => s.lastImportFailure);
 
   const handleData = useCallback(
     (raw: unknown) => {
-      const { job: validated, errors: errs } = validateJob(raw);
-      setJob(validated);
-      if (errs.length > 0) {
-        addErrors(errs);
-      }
+      importJob(raw);
     },
-    [setJob, addErrors]
+    [importJob]
   );
 
   const handleFile = useCallback(
@@ -34,12 +30,12 @@ export default function ImportPanel() {
           const data = JSON.parse(e.target?.result as string);
           handleData(data);
         } catch {
-          addErrors([{ type: "invalid_load", message: "JSON 解析失败" }]);
+          importJob(null);
         }
       };
       reader.readAsText(file);
     },
-    [handleData, addErrors]
+    [handleData, importJob]
   );
 
   const onDrop = useCallback(
@@ -73,6 +69,20 @@ export default function ImportPanel() {
   const loadSample = useCallback(() => {
     handleData(sampleJob);
   }, [handleData]);
+
+  const formatTime = (iso: string) => {
+    try {
+      const d = new Date(iso);
+      return d.toLocaleString("zh-CN", {
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+      });
+    } catch {
+      return iso;
+    }
+  };
 
   return (
     <div className="fixed top-4 left-4 z-50 w-80">
@@ -128,7 +138,13 @@ export default function ImportPanel() {
           </div>
 
           {errors.length > 0 && (
-            <div className="px-3 pb-3 space-y-1.5">
+            <div className="px-3 pb-2 space-y-1.5">
+              <div className="flex items-center gap-1.5 mb-1">
+                <XCircle size={13} className="text-red-400" />
+                <span className="text-xs text-red-400 font-medium">
+                  预检未通过，当前作业保持不变
+                </span>
+              </div>
               {errors.map((err, i) => (
                 <div
                   key={i}
@@ -161,6 +177,31 @@ export default function ImportPanel() {
                   <span className="text-gray-200">{job.meta.craneId}</span>
                 </div>
               </div>
+            </div>
+          )}
+
+          {(lastImportSuccess || lastImportFailure) && (
+            <div className="px-3 pb-3 border-t border-[#2D3748] pt-2 space-y-1">
+              <div className="flex items-center gap-1.5 mb-1">
+                <Clock size={12} className="text-[#5A7A9E]" />
+                <span className="text-[10px] text-[#5A7A9E]">导入记录</span>
+              </div>
+              {lastImportSuccess && (
+                <div className="flex items-center gap-1.5 text-[10px]">
+                  <CheckCircle size={10} className="text-green-500" />
+                  <span className="text-[#5A7A9E]">
+                    上次成功: {formatTime(lastImportSuccess)}
+                  </span>
+                </div>
+              )}
+              {lastImportFailure && (
+                <div className="flex items-center gap-1.5 text-[10px]">
+                  <XCircle size={10} className="text-red-400" />
+                  <span className="text-[#5A7A9E]">
+                    上次失败: {formatTime(lastImportFailure.timestamp)} — {lastImportFailure.reason}
+                  </span>
+                </div>
+              )}
             </div>
           )}
         </div>

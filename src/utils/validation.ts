@@ -1,33 +1,64 @@
-import type { LiftingJob, TrajectoryPoint, ValidationError } from "@/types";
+import type { LiftingJob, ValidationError } from "@/types";
 
-export function validateJob(
-  raw: unknown
-): { job: LiftingJob; errors: ValidationError[] } {
+export interface PrecheckResult {
+  passed: boolean;
+  errors: ValidationError[];
+}
+
+export function precheckJob(raw: unknown): PrecheckResult {
   const errors: ValidationError[] = [];
+
+  if (!raw || typeof raw !== "object") {
+    errors.push({
+      type: "invalid_load",
+      message: "JSON 根对象无效或为空",
+    });
+    return { passed: false, errors };
+  }
 
   const job = raw as LiftingJob;
 
-  if (!job || !job.trajectory || !Array.isArray(job.trajectory)) {
+  if (!job.trajectory || !Array.isArray(job.trajectory)) {
     errors.push({
       type: "invalid_load",
       message: "JSON 缺少 trajectory 数组",
     });
-    return { job: job || ({} as LiftingJob), errors };
+    return { passed: false, errors };
   }
 
-  if (!job.restrictedZones || !Array.isArray(job.restrictedZones)) {
-    job.restrictedZones = [];
+  if (job.trajectory.length === 0) {
+    errors.push({
+      type: "invalid_load",
+      message: "trajectory 数组为空",
+    });
+    return { passed: false, errors };
   }
 
-  const zoneIds = new Set(job.restrictedZones.map((z) => z.id));
+  if (!job.meta || typeof job.meta !== "object") {
+    errors.push({
+      type: "invalid_load",
+      message: "JSON 缺少 meta 对象",
+    });
+  }
+
+  if (!job.crane || typeof job.crane !== "object") {
+    errors.push({
+      type: "invalid_load",
+      message: "JSON 缺少 crane 对象",
+    });
+  }
+
+  const zoneIds = new Set<string>();
+  if (job.restrictedZones && Array.isArray(job.restrictedZones)) {
+    for (const z of job.restrictedZones) {
+      if (z && z.id) zoneIds.add(z.id);
+    }
+  }
 
   for (let i = 0; i < job.trajectory.length; i++) {
     const pt = job.trajectory[i];
 
-    if (
-      pt.zoneIds &&
-      Array.isArray(pt.zoneIds)
-    ) {
+    if (pt.zoneIds && Array.isArray(pt.zoneIds)) {
       for (const zid of pt.zoneIds) {
         if (!zoneIds.has(zid)) {
           errors.push({
@@ -45,7 +76,6 @@ export function validateJob(
         message: `轨迹点 ${i} 载重字段格式错误: "${pt.load}"`,
         pointIndex: i,
       });
-      pt.load = NaN;
     }
 
     if (i > 0 && pt.timestamp < job.trajectory[i - 1].timestamp) {
@@ -57,12 +87,13 @@ export function validateJob(
     }
   }
 
-  const hasReverse = errors.some((e) => e.type === "timestamp_reverse");
-  if (hasReverse) {
-    job.trajectory.sort(
-      (a: TrajectoryPoint, b: TrajectoryPoint) => a.timestamp - b.timestamp
-    );
-  }
+  return { passed: errors.length === 0, errors };
+}
 
-  return { job, errors };
+export function sanitizeJob(raw: unknown): LiftingJob {
+  const job = raw as LiftingJob;
+  if (!job.restrictedZones || !Array.isArray(job.restrictedZones)) {
+    job.restrictedZones = [];
+  }
+  return job;
 }

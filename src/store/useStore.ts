@@ -6,6 +6,13 @@ import type {
   Annotation,
   ValidationError,
 } from "@/types";
+import { precheckJob, sanitizeJob } from "@/utils/validation";
+
+export interface ImportFailureRecord {
+  reason: string;
+  errors: ValidationError[];
+  timestamp: string;
+}
 
 interface AppState {
   job: LiftingJob | null;
@@ -18,8 +25,11 @@ interface AppState {
   showIgnored: boolean;
   errors: ValidationError[];
   rightPanelOpen: boolean;
+  lastImportSuccess: string | null;
+  lastImportFailure: ImportFailureRecord | null;
 
   setJob: (job: LiftingJob | null) => void;
+  importJob: (raw: unknown) => { success: boolean; errors: ValidationError[] };
   setCurrentTime: (t: number) => void;
   setIsPlaying: (p: boolean) => void;
   setPlaybackSpeed: (s: number) => void;
@@ -78,9 +88,32 @@ export const useStore = create<AppState>()(
       showIgnored: true,
       errors: [],
       rightPanelOpen: true,
+      lastImportSuccess: null,
+      lastImportFailure: null,
 
       setJob: (job) =>
         set({ job, currentTime: 0, isPlaying: false, errors: [] }),
+      importJob: (raw: unknown) => {
+        const result = precheckJob(raw);
+        if (!result.passed) {
+          const failureRecord: ImportFailureRecord = {
+            reason: `预检未通过，共 ${result.errors.length} 项错误`,
+            errors: result.errors,
+            timestamp: new Date().toISOString(),
+          };
+          set({ errors: result.errors, lastImportFailure: failureRecord });
+          return { success: false, errors: result.errors };
+        }
+        const job = sanitizeJob(raw);
+        set({
+          job,
+          currentTime: 0,
+          isPlaying: false,
+          errors: [],
+          lastImportSuccess: new Date().toISOString(),
+        });
+        return { success: true, errors: [] };
+      },
       setCurrentTime: (currentTime) => set({ currentTime }),
       setIsPlaying: (isPlaying) => set({ isPlaying }),
       setPlaybackSpeed: (playbackSpeed) => set({ playbackSpeed }),
@@ -125,6 +158,8 @@ export const useStore = create<AppState>()(
         annotations: state.annotations,
         ignoredRiskIds: state.ignoredRiskIds,
         showIgnored: state.showIgnored,
+        lastImportSuccess: state.lastImportSuccess,
+        lastImportFailure: state.lastImportFailure,
       }),
     }
   )

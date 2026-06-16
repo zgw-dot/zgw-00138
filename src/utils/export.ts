@@ -1,14 +1,54 @@
 import type { LiftingJob, Annotation } from "@/types";
 
+interface RiskStats {
+  total: number;
+  danger: number;
+  warning: number;
+  safe: number;
+  ignored: number;
+  visible: number;
+  exported: number;
+}
+
+function computeRiskStats(
+  annotations: Annotation[],
+  ignoredRiskIds: string[],
+  showIgnored: boolean
+): RiskStats {
+  const total = annotations.length;
+  const danger = annotations.filter((a) => a.riskLevel === "danger").length;
+  const warning = annotations.filter((a) => a.riskLevel === "warning").length;
+  const safe = annotations.filter((a) => a.riskLevel === "safe").length;
+  const ignored = ignoredRiskIds.length;
+  const visible = showIgnored
+    ? total
+    : annotations.filter((a) => !ignoredRiskIds.includes(a.id)).length;
+  const exported = visible;
+  return { total, danger, warning, safe, ignored, visible, exported };
+}
+
+function getVisibleAnnotations(
+  annotations: Annotation[],
+  ignoredRiskIds: string[],
+  showIgnored: boolean
+): Annotation[] {
+  return showIgnored
+    ? annotations
+    : annotations.filter((a) => !ignoredRiskIds.includes(a.id));
+}
+
 export function exportToJSON(
   job: LiftingJob,
   annotations: Annotation[],
   ignoredRiskIds: string[],
   showIgnored: boolean
 ): string {
-  const visibleAnnotations = showIgnored
-    ? annotations
-    : annotations.filter((a) => !ignoredRiskIds.includes(a.id));
+  const visibleAnnotations = getVisibleAnnotations(
+    annotations,
+    ignoredRiskIds,
+    showIgnored
+  );
+  const stats = computeRiskStats(annotations, ignoredRiskIds, showIgnored);
 
   const report = {
     meta: job.meta,
@@ -24,10 +64,13 @@ export function exportToJSON(
       ignored: a.ignored,
       createdAt: a.createdAt,
     })),
+    riskStats: stats,
     exportedAt: new Date().toISOString(),
     exportOptions: {
       includeIgnored: showIgnored,
       ignoredCount: ignoredRiskIds.length,
+      visibleCount: stats.visible,
+      exportedCount: stats.exported,
     },
   };
 
@@ -40,9 +83,12 @@ export function exportToCSV(
   ignoredRiskIds: string[],
   showIgnored: boolean
 ): string {
-  const visibleAnnotations = showIgnored
-    ? annotations
-    : annotations.filter((a) => !ignoredRiskIds.includes(a.id));
+  const visibleAnnotations = getVisibleAnnotations(
+    annotations,
+    ignoredRiskIds,
+    showIgnored
+  );
+  const stats = computeRiskStats(annotations, ignoredRiskIds, showIgnored);
 
   const lines: string[] = [];
 
@@ -67,6 +113,17 @@ export function exportToCSV(
     );
   }
 
+  lines.push("");
+  lines.push("=== 风险统计 ===");
+  lines.push(`批注总数,${stats.total}`);
+  lines.push(`危险,${stats.danger}`);
+  lines.push(`警告,${stats.warning}`);
+  lines.push(`安全,${stats.safe}`);
+  lines.push(`已忽略,${stats.ignored}`);
+  lines.push(`可见,${stats.visible}`);
+  lines.push(`导出,${stats.exported}`);
+  lines.push(`包含已忽略,${showIgnored}`);
+
   return lines.join("\n");
 }
 
@@ -79,3 +136,5 @@ export function downloadFile(content: string, filename: string, mime: string) {
   a.click();
   URL.revokeObjectURL(url);
 }
+
+export { computeRiskStats, getVisibleAnnotations };
