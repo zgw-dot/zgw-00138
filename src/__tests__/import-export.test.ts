@@ -4611,23 +4611,27 @@ describe("session-trail-archive - 会话轨迹归档三条核心链路验证", (
     expect(pkg.operationLogs[0].context?.templateSourceIds).toBeDefined();
 
     const serialized = store.exportPackageToFile(pkg.id);
-    const detectResult = store.importPackageFromFile(serialized);
-    expect(detectResult.success).toBe(false);
-    expect(detectResult.conflict).toBeDefined();
 
-    const logsAfterDetect = store.getPackageLogs();
-    expect(logsAfterDetect.some((l) => l.action === "import_conflict_detected")).toBe(true);
-    const detectedLog = logsAfterDetect.find((l) => l.action === "import_conflict_detected");
-    expect(detectedLog?.context?.conflictExistingVersion).toBe("1.0.0");
+    const precheckResult = store.precheckImportConflict(serialized);
+    expect(precheckResult.valid).toBe(true);
+    expect(precheckResult.conflict).toBeDefined();
+
+    const logsAfterPrecheck = store.getPackageLogs();
+    expect(logsAfterPrecheck.some((l) => l.action === "import_conflict_detected")).toBe(false);
 
     const cancelResult = store.importPackageFromFile(serialized, "cancel");
     expect(cancelResult.success).toBe(false);
 
     const finalLogs = store.getPackageLogs();
+
+    const detectedLogs = finalLogs.filter((l) => l.action === "import_conflict_detected");
+    expect(detectedLogs.length).toBe(1);
+    expect(detectedLogs[0].context?.conflictExistingVersion).toBe("1.0.0");
+
     const cancelLogs = finalLogs.filter((l) => l.action === "import_conflict_cancel");
-    expect(cancelLogs.length).toBeGreaterThanOrEqual(1);
-    expect(cancelLogs[cancelLogs.length - 1].context?.conflictResolution).toBe("cancel");
-    expect(cancelLogs[cancelLogs.length - 1].success).toBe(false);
+    expect(cancelLogs.length).toBe(1);
+    expect(cancelLogs[0].context?.conflictResolution).toBe("cancel");
+    expect(cancelLogs[0].success).toBe(false);
 
     const publishLog = finalLogs.find((l) => l.action === "publish");
     expect(publishLog).toBeDefined();
@@ -4987,14 +4991,14 @@ describe("audit-recovery - 会话审计恢复验证", () => {
 
     store.setState({ sessionPackageLogs: [] });
 
-    const firstResult = store.getState().importPackageFromFile(serialized);
-    expect(firstResult.conflict).toBeDefined();
+    const precheckResult = store.getState().precheckImportConflict(serialized);
+    expect(precheckResult.valid).toBe(true);
+    expect(precheckResult.conflict).toBeDefined();
 
-    const conflictLogs = store.getState().sessionPackageLogs.filter(
+    const logsAfterPrecheck = store.getState().sessionPackageLogs.filter(
       (l) => l.action === "import_conflict_detected"
     );
-    expect(conflictLogs.length).toBe(1);
-    expect(conflictLogs[0].context?.conflictExistingVersion).toBe("1.0.0");
+    expect(logsAfterPrecheck.length).toBe(0);
 
     const resolvedResult = store.getState().importPackageFromFile(serialized, "rename", "1.0.1");
     expect(resolvedResult.success).toBe(true);
@@ -5004,6 +5008,10 @@ describe("audit-recovery - 会话审计恢复验证", () => {
       (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
     );
     const actions = sortedLogs.map((l) => l.action);
+
+    const detectedLogs = sortedLogs.filter((l) => l.action === "import_conflict_detected");
+    expect(detectedLogs.length).toBe(1);
+    expect(detectedLogs[0].context?.conflictExistingVersion).toBe("1.0.0");
 
     const detectedIdx = actions.indexOf("import_conflict_detected");
     const renameIdx = actions.indexOf("import_conflict_rename");
@@ -5282,6 +5290,256 @@ describe("audit-recovery - 会话审计恢复验证", () => {
     const result = store.getState().importPackageFromFile(oldContent);
     expect(result.success).toBe(true);
     expect(result.package?.schemaVersion).toBe("0.0.0");
+  });
+
+  it("两步导入 - 预检+改名导入，冲突日志仅一条且顺序稳定", async () => {
+    const { useStore } = await import("@/store/useStore");
+    const store = useStore;
+
+    store.getState().importJob(makeValidJob());
+    store.setState({ annotations: makeAnnotations(3, "warning", 0) });
+
+    const existingPkg = store.getState().publishSessionPackage("两步导入测试包", "1.0.0");
+    const serialized = store.getState().exportPackageToFile(existingPkg.id);
+
+    store.setState({ sessionPackageLogs: [] });
+
+    const precheck = store.getState().precheckImportConflict(serialized);
+    expect(precheck.valid).toBe(true);
+    expect(precheck.conflict).toBeDefined();
+    expect(precheck.conflict?.existingPackage.version).toBe("1.0.0");
+
+    const logsAfterPrecheck = store.getState().sessionPackageLogs;
+    expect(logsAfterPrecheck.some((l) => l.action === "import_conflict_detected")).toBe(false);
+
+    const importResult = store.getState().importPackageFromFile(serialized, "rename", "1.0.1");
+    expect(importResult.success).toBe(true);
+    expect(importResult.package?.version).toBe("1.0.1");
+
+    const allLogs = store.getState().sessionPackageLogs;
+    const detectedLogs = allLogs.filter((l) => l.action === "import_conflict_detected");
+    expect(detectedLogs.length).toBe(1);
+
+    const renameLogs = allLogs.filter((l) => l.action === "import_conflict_rename");
+    expect(renameLogs.length).toBe(1);
+
+    const importLogs = allLogs.filter((l) => l.action === "import");
+    expect(importLogs.length).toBe(1);
+
+    const sorted = [...allLogs].sort(
+      (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
+    );
+    const actions = sorted.map((l) => l.action);
+
+    const detectedIdx = actions.indexOf("import_conflict_detected");
+    const renameIdx = actions.indexOf("import_conflict_rename");
+    const importIdx = actions.indexOf("import");
+
+    expect(detectedIdx).toBeGreaterThanOrEqual(0);
+    expect(renameIdx).toBeGreaterThan(detectedIdx);
+    expect(importIdx).toBeGreaterThan(renameIdx);
+
+    const importedPkg = store.getState().getPackageById(importResult.package!.id);
+    const pkgLogs = importedPkg?.operationLogs || [];
+    const pkgDetected = pkgLogs.filter((l) => l.action === "import_conflict_detected");
+    expect(pkgDetected.length).toBe(1);
+  });
+
+  it("两步导入 - 预检+覆盖导入，冲突日志仅一条且顺序稳定", async () => {
+    const { useStore } = await import("@/store/useStore");
+    const store = useStore;
+
+    store.getState().importJob(makeValidJob());
+    store.setState({ annotations: makeAnnotations(2, "danger", 0) });
+
+    const originalPkg = store.getState().publishSessionPackage("覆盖导入测试包", "1.0.0");
+    const serialized = store.getState().exportPackageToFile(originalPkg.id);
+
+    store.getState().addAnnotation({
+      id: "ann-extra-2",
+      timestamp: 5000,
+      position: [0, 0, 0] as [number, number, number],
+      riskLevel: "safe",
+      text: "额外批注",
+      ignored: false,
+      createdAt: new Date().toISOString(),
+    });
+
+    store.setState({ sessionPackageLogs: [] });
+
+    const precheck = store.getState().precheckImportConflict(serialized);
+    expect(precheck.valid).toBe(true);
+    expect(precheck.conflict).toBeDefined();
+    expect(precheck.conflict?.existingPackage.version).toBe("1.0.0");
+
+    const logsAfterPrecheck = store.getState().sessionPackageLogs;
+    expect(logsAfterPrecheck.some((l) => l.action === "import_conflict_detected")).toBe(false);
+
+    const importResult = store.getState().importPackageFromFile(serialized, "overwrite");
+    expect(importResult.success).toBe(true);
+
+    const allLogs = store.getState().sessionPackageLogs;
+    const detectedLogs = allLogs.filter((l) => l.action === "import_conflict_detected");
+    expect(detectedLogs.length).toBe(1);
+
+    const overwriteLogs = allLogs.filter((l) => l.action === "import_conflict_overwrite");
+    expect(overwriteLogs.length).toBe(1);
+
+    const importLogs = allLogs.filter((l) => l.action === "import");
+    expect(importLogs.length).toBe(1);
+
+    const sorted = [...allLogs].sort(
+      (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
+    );
+    const actions = sorted.map((l) => l.action);
+
+    const detectedIdx = actions.indexOf("import_conflict_detected");
+    const overwriteIdx = actions.indexOf("import_conflict_overwrite");
+    const importIdx = actions.indexOf("import");
+
+    expect(detectedIdx).toBeLessThan(overwriteIdx);
+    expect(overwriteIdx).toBeLessThan(importIdx);
+  });
+
+  it("重复导入去重 - 同一包多次导入改名，日志不重复", async () => {
+    const { useStore } = await import("@/store/useStore");
+    const store = useStore;
+
+    store.getState().importJob(makeValidJob());
+    store.setState({ annotations: makeAnnotations(2, "warning", 0) });
+    const pkg = store.getState().publishSessionPackage("重复导入测试包", "1.0.0");
+    const serialized = store.getState().exportPackageToFile(pkg.id);
+
+    store.setState({
+      sessionPackages: {},
+      sessionPackageLogs: [],
+      currentPackageId: null,
+      lastPublishId: null,
+    });
+
+    const firstImport = store.getState().importPackageFromFile(serialized);
+    expect(firstImport.success).toBe(true);
+
+    const logsAfterFirst = store.getState().sessionPackageLogs.length;
+    const importLogsAfterFirst = store.getState().sessionPackageLogs.filter(
+      (l) => l.action === "import"
+    ).length;
+    expect(importLogsAfterFirst).toBe(1);
+
+    const secondImport = store.getState().importPackageFromFile(
+      serialized,
+      "rename",
+      "1.0.1"
+    );
+    expect(secondImport.success).toBe(true);
+
+    const allLogs = store.getState().sessionPackageLogs;
+
+    const publishLogs = allLogs.filter((l) => l.action === "publish");
+    expect(publishLogs.length).toBe(1);
+
+    const importLogs = allLogs.filter((l) => l.action === "import");
+    expect(importLogs.length).toBe(2);
+
+    const logIds = allLogs.map((l) => l.id);
+    const uniqueIds = new Set(logIds);
+    expect(logIds.length).toBe(uniqueIds.size);
+  });
+
+  it("重启后审计链路 - 冲突导入的包重启后日志完整可追溯", async () => {
+    const { useStore } = await import("@/store/useStore");
+    const store = useStore;
+
+    store.getState().importJob(makeValidJob());
+    store.setState({ annotations: makeAnnotations(3, "danger", 0) });
+    store.getState().setCurrentTime(3000);
+
+    const pkgV1 = store.getState().publishSessionPackage("重启审计测试包", "1.0.0");
+    const serializedV1 = store.getState().exportPackageToFile(pkgV1.id);
+
+    const importResult = store.getState().importPackageFromFile(serializedV1, "rename", "1.0.1");
+    expect(importResult.success).toBe(true);
+
+    const importedPkgId = importResult.package!.id;
+
+    store.getState().restoreFromPackage(importedPkgId);
+
+    const stateBefore = store.getState();
+    const logsBefore = stateBefore.sessionPackageLogs;
+    const packagesBefore = stateBefore.sessionPackages;
+
+    const detectedLogsBefore = logsBefore.filter((l) => l.action === "import_conflict_detected");
+    const renameLogsBefore = logsBefore.filter((l) => l.action === "import_conflict_rename");
+    const importLogsBefore = logsBefore.filter((l) => l.action === "import");
+    const auditLogsBefore = logsBefore.filter((l) => l.action === "audit_restore");
+
+    expect(detectedLogsBefore.length).toBe(1);
+    expect(renameLogsBefore.length).toBe(1);
+    expect(importLogsBefore.length).toBe(1);
+    expect(auditLogsBefore.length).toBe(1);
+
+    const persisted = {
+      job: stateBefore.job,
+      cameraPresets: stateBefore.cameraPresets,
+      camera: stateBefore.camera,
+      annotations: stateBefore.annotations,
+      ignoredRiskIds: stateBefore.ignoredRiskIds,
+      showIgnored: stateBefore.showIgnored,
+      riskLevelFilter: stateBefore.riskLevelFilter,
+      lastImportSuccess: stateBefore.lastImportSuccess,
+      lastImportFailure: stateBefore.lastImportFailure,
+      snapshots: stateBefore.snapshots,
+      currentSnapshotId: stateBefore.currentSnapshotId,
+      currentJobId: stateBefore.currentJobId,
+      snapshotHistory: stateBefore.snapshotHistory,
+      templates: stateBefore.templates,
+      sessionPackages: stateBefore.sessionPackages,
+      sessionPackageLogs: stateBefore.sessionPackageLogs,
+      currentPackageId: stateBefore.currentPackageId,
+      lastPublishId: stateBefore.lastPublishId,
+    };
+
+    store.setState({
+      ...persisted,
+      isPlaying: false,
+      playbackSpeed: 1,
+      errors: [],
+      rightPanelOpen: true,
+    });
+
+    const stateAfter = store.getState();
+    expect(stateAfter.sessionPackageLogs.length).toBe(logsBefore.length);
+
+    const logsAfter = stateAfter.sessionPackageLogs;
+    const detectedLogsAfter = logsAfter.filter((l) => l.action === "import_conflict_detected");
+    const renameLogsAfter = logsAfter.filter((l) => l.action === "import_conflict_rename");
+    const importLogsAfter = logsAfter.filter((l) => l.action === "import");
+    const auditLogsAfter = logsAfter.filter((l) => l.action === "audit_restore");
+    const publishLogsAfter = logsAfter.filter((l) => l.action === "publish");
+
+    expect(detectedLogsAfter.length).toBe(1);
+    expect(renameLogsAfter.length).toBe(1);
+    expect(importLogsAfter.length).toBe(1);
+    expect(auditLogsAfter.length).toBe(1);
+    expect(publishLogsAfter.length).toBeGreaterThanOrEqual(1);
+
+    expect(stateAfter.sessionPackages).toEqual(packagesBefore);
+
+    const restoredPkg = stateAfter.getPackageById(importedPkgId);
+    expect(restoredPkg).toBeDefined();
+    expect(restoredPkg?.version).toBe("1.0.1");
+
+    const pkgLogs = restoredPkg?.operationLogs || [];
+    const pkgDetected = pkgLogs.filter((l) => l.action === "import_conflict_detected");
+    const pkgRename = pkgLogs.filter((l) => l.action === "import_conflict_rename");
+    const pkgImport = pkgLogs.filter((l) => l.action === "import");
+
+    expect(pkgDetected.length).toBe(1);
+    expect(pkgRename.length).toBe(1);
+    expect(pkgImport.length).toBe(1);
+
+    const restoreResult = stateAfter.restoreFromPackage(importedPkgId);
+    expect(restoreResult.success).toBe(true);
   });
 });
 

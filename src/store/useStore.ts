@@ -12,6 +12,7 @@ import type {
   SnapshotHistoryEntry,
   ReviewSessionPackage,
   SessionPackageLogEntry,
+  ImportConflictInfo,
   ImportResolution,
   ImportResult,
 } from "@/types";
@@ -122,6 +123,7 @@ interface AppState {
   checkPackagesExpired: () => void;
   canExportSessionPackage: (packageId: string) => boolean;
   exportPackageToFile: (packageId: string) => string;
+  precheckImportConflict: (content: string) => { valid: boolean; errors?: string[]; conflict?: ImportConflictInfo | null; pkg?: ReviewSessionPackage };
   importPackageFromFile: (content: string, resolution?: ImportResolution, newVersion?: string) => ImportResult;
   restoreFromPackage: (packageId: string) => { success: boolean; errors?: string[] };
   getPackageLogs: () => SessionPackageLogEntry[];
@@ -905,6 +907,20 @@ export const useStore = create<AppState>()(
         return serializePackage(pkgWithLog);
       },
 
+      precheckImportConflict: (content: string) => {
+        const state = get();
+        const result = deserializePackage(content);
+
+        if (!result.valid || !result.pkg) {
+          return { valid: false, errors: result.errors };
+        }
+
+        const allPackages = Object.values(state.sessionPackages).flat();
+        const conflict = checkImportConflict(result.pkg, allPackages);
+
+        return { valid: true, conflict, pkg: result.pkg };
+      },
+
       importPackageFromFile: (content: string, resolution?: ImportResolution, newVersion?: string) => {
         const state = get();
         const result = deserializePackage(content);
@@ -950,19 +966,16 @@ export const useStore = create<AppState>()(
         const pendingLogs: SessionPackageLogEntry[] = [];
 
         if (conflict) {
+          if (!resolution) {
+            return { success: false, conflict };
+          }
+
           const conflictDetectedLog = createConflictDetectedLog(
             conflict.existingPackage,
             incoming
           );
           pendingLogs.push(conflictDetectedLog);
           incoming = appendLogToPackage(incoming, conflictDetectedLog);
-
-          if (!resolution) {
-            set((s) => ({
-              sessionPackageLogs: [...s.sessionPackageLogs, conflictDetectedLog],
-            }));
-            return { success: false, conflict };
-          }
 
           const resolutionLog = createConflictResolutionLog(
             incoming,

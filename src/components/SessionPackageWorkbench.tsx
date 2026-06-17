@@ -87,6 +87,7 @@ export default function SessionPackageWorkbench() {
   const checkPackagesExpired = useStore((s) => s.checkPackagesExpired);
   const canExportSessionPackage = useStore((s) => s.canExportSessionPackage);
   const exportPackageToFile = useStore((s) => s.exportPackageToFile);
+  const precheckImportConflict = useStore((s) => s.precheckImportConflict);
   const importPackageFromFile = useStore((s) => s.importPackageFromFile);
   const restoreFromPackage = useStore((s) => s.restoreFromPackage);
   const getPackageLogsByPackageId = useStore(
@@ -299,29 +300,39 @@ export default function SessionPackageWorkbench() {
       reader.onload = (ev) => {
         const content = ev.target?.result as string;
         setPendingImportContent(content);
-        const result = importPackageFromFile(content);
-        if (result.success) {
-          showToast("success", "导入会话包成功");
-          setPendingImportContent(null);
-        } else if (result.conflict) {
-          setPendingConflict(result.conflict);
-          setConflictNewVersion(
-            incrementVersion(result.conflict.incomingPackage.version)
-          );
-          setConflictResolution("rename");
-          setDialog("conflict");
-        } else {
+        const precheck = precheckImportConflict(content);
+        if (!precheck.valid) {
+          const result = importPackageFromFile(content);
           showToast(
             "error",
             `导入失败: ${(result.errors || []).join(", ")}`
           );
           setPendingImportContent(null);
+        } else if (precheck.conflict) {
+          setPendingConflict(precheck.conflict);
+          setConflictNewVersion(
+            incrementVersion(precheck.conflict.incomingPackage.version)
+          );
+          setConflictResolution("rename");
+          setDialog("conflict");
+        } else {
+          const result = importPackageFromFile(content);
+          if (result.success) {
+            showToast("success", "导入会话包成功");
+            setPendingImportContent(null);
+          } else {
+            showToast(
+              "error",
+              `导入失败: ${(result.errors || []).join(", ")}`
+            );
+            setPendingImportContent(null);
+          }
         }
       };
       reader.readAsText(file);
       if (importFileRef.current) importFileRef.current.value = "";
     },
-    [importPackageFromFile, showToast]
+    [precheckImportConflict, importPackageFromFile, showToast]
   );
 
   const handleConflictCancel = useCallback(() => {
