@@ -25,6 +25,11 @@ import {
   canExportPackage,
   createLogEntry,
   createImportFailureLog,
+  createConflictDetectedLog,
+  createConflictResolutionLog,
+  appendLogToPackage,
+  mergeLogsFromPackage,
+  buildLogContext,
   serializePackage,
   deserializePackage,
   checkImportConflict,
@@ -601,22 +606,33 @@ export const useStore = create<AppState>()(
           version
         );
 
-        const logEntry = createLogEntry(pkg, "publish", true, "发布会话包成功");
+        const logContext = buildLogContext(
+          state.currentTime,
+          state.camera,
+          state.showIgnored,
+          state.riskLevelFilter,
+          state.ignoredRiskIds,
+          state.annotations,
+          state.templates
+        );
+
+        const logEntry = createLogEntry(pkg, "publish", true, "发布会话包成功", logContext);
+        const pkgWithLog = appendLogToPackage(pkg, logEntry);
 
         set((s) => {
           const jobPackages = s.sessionPackages[jobId] || [];
           return {
             sessionPackages: {
               ...s.sessionPackages,
-              [jobId]: [...jobPackages, pkg],
+              [jobId]: [...jobPackages, pkgWithLog],
             },
-            currentPackageId: pkg.id,
-            lastPublishId: pkg.id,
+            currentPackageId: pkgWithLog.id,
+            lastPublishId: pkgWithLog.id,
             sessionPackageLogs: [...s.sessionPackageLogs, logEntry],
           };
         });
 
-        return pkg;
+        return pkgWithLog;
       },
 
       updateSessionPackage: (packageId: string, newVersion?: string) => {
@@ -647,12 +663,23 @@ export const useStore = create<AppState>()(
           newVersion
         );
 
-        const logEntry = createLogEntry(updated, "update", true, "更新会话包成功");
+        const logContext = buildLogContext(
+          state.currentTime,
+          state.camera,
+          state.showIgnored,
+          state.riskLevelFilter,
+          state.ignoredRiskIds,
+          state.annotations,
+          state.templates
+        );
+
+        const logEntry = createLogEntry(updated, "update", true, "更新会话包成功", logContext);
+        const updatedWithLog = appendLogToPackage(updated, logEntry);
 
         set((s) => {
           const jobPackages = s.sessionPackages[pkg.jobId] || [];
           const newPackages = jobPackages.map((p) =>
-            p.id === pkg.id ? updated : p
+            p.id === pkg.id ? updatedWithLog : p
           );
           return {
             sessionPackages: {
@@ -663,7 +690,7 @@ export const useStore = create<AppState>()(
           };
         });
 
-        return { success: true, pkg: updated };
+        return { success: true, pkg: updatedWithLog };
       },
 
       saveAsNewVersion: (packageId: string, customVersion?: string) => {
@@ -695,22 +722,33 @@ export const useStore = create<AppState>()(
           newVersion
         );
 
-        const logEntry = createLogEntry(newPkg, "publish", true, `另存新版本 ${newVersion} 成功`);
+        const logContext = buildLogContext(
+          state.currentTime,
+          state.camera,
+          state.showIgnored,
+          state.riskLevelFilter,
+          state.ignoredRiskIds,
+          state.annotations,
+          state.templates
+        );
+
+        const logEntry = createLogEntry(newPkg, "save_as", true, `另存新版本 ${newVersion} 成功`, logContext);
+        const newPkgWithLog = appendLogToPackage(newPkg, logEntry);
 
         set((s) => {
           const jobPackages = s.sessionPackages[existingPkg.jobId] || [];
           return {
             sessionPackages: {
               ...s.sessionPackages,
-              [existingPkg.jobId]: [...jobPackages, newPkg],
+              [existingPkg.jobId]: [...jobPackages, newPkgWithLog],
             },
-            currentPackageId: newPkg.id,
-            lastPublishId: newPkg.id,
+            currentPackageId: newPkgWithLog.id,
+            lastPublishId: newPkgWithLog.id,
             sessionPackageLogs: [...s.sessionPackageLogs, logEntry],
           };
         });
 
-        return { success: true, pkg: newPkg };
+        return { success: true, pkg: newPkgWithLog };
       },
 
       revokeLastPublish: () => {
@@ -727,11 +765,12 @@ export const useStore = create<AppState>()(
         const expiredPkg = markPackageExpired(pkg, "已撤销发布");
 
         const logEntry = createLogEntry(expiredPkg, "revoke", true, "撤销发布成功");
+        const expiredWithLog = appendLogToPackage(expiredPkg, logEntry);
 
         set((s) => {
           const jobPackages = s.sessionPackages[pkg.jobId] || [];
           const newPackages = jobPackages.map((p) =>
-            p.id === pkg.id ? expiredPkg : p
+            p.id === pkg.id ? expiredWithLog : p
           );
           return {
             sessionPackages: {
@@ -743,7 +782,7 @@ export const useStore = create<AppState>()(
           };
         });
 
-        return { success: true, pkg: expiredPkg };
+        return { success: true, pkg: expiredWithLog };
       },
 
       getCurrentJobPackages: () => {
@@ -849,14 +888,34 @@ export const useStore = create<AppState>()(
           return { success: false, errors: result.errors };
         }
 
-        const incoming = result.pkg;
+        let incoming = result.pkg;
         const allPackages = Object.values(state.sessionPackages).flat();
         const conflict = checkImportConflict(incoming, allPackages);
 
+        const pendingLogs: SessionPackageLogEntry[] = [];
+
         if (conflict) {
+          const conflictDetectedLog = createConflictDetectedLog(
+            conflict.existingPackage,
+            incoming
+          );
+          pendingLogs.push(conflictDetectedLog);
+          incoming = appendLogToPackage(incoming, conflictDetectedLog);
+
           if (!resolution) {
+            set((s) => ({
+              sessionPackageLogs: [...s.sessionPackageLogs, conflictDetectedLog],
+            }));
             return { success: false, conflict };
           }
+
+          const resolutionLog = createConflictResolutionLog(
+            incoming,
+            resolution,
+            newVersion
+          );
+          pendingLogs.push(resolutionLog);
+          incoming = appendLogToPackage(incoming, resolutionLog);
 
           const resolved = resolveImportConflict(
             incoming,
@@ -866,6 +925,9 @@ export const useStore = create<AppState>()(
           );
 
           if (!resolved) {
+            set((s) => ({
+              sessionPackageLogs: [...s.sessionPackageLogs, ...pendingLogs],
+            }));
             return { success: false };
           }
 
@@ -873,7 +935,9 @@ export const useStore = create<AppState>()(
           incoming.version = resolved.version;
         }
 
-        const logEntry = createLogEntry(incoming, "import", true, "导入会话包成功");
+        const importLog = createLogEntry(incoming, "import", true, "导入会话包成功");
+        pendingLogs.push(importLog);
+        incoming = appendLogToPackage(incoming, importLog);
 
         set((s) => {
           const jobPackages = s.sessionPackages[incoming.jobId] || [];
@@ -885,12 +949,23 @@ export const useStore = create<AppState>()(
           } else {
             newPackages = [...jobPackages, incoming];
           }
+
+          const mergedLogs = mergeLogsFromPackage(s.sessionPackageLogs, incoming);
+          const finalLogs = [...mergedLogs];
+          const existingLogIds = new Set(finalLogs.map((l) => l.id));
+          for (const pl of pendingLogs) {
+            if (!existingLogIds.has(pl.id)) {
+              finalLogs.push(pl);
+              existingLogIds.add(pl.id);
+            }
+          }
+
           return {
             sessionPackages: {
               ...s.sessionPackages,
               [incoming.jobId]: newPackages,
             },
-            sessionPackageLogs: [...s.sessionPackageLogs, logEntry],
+            sessionPackageLogs: finalLogs,
           };
         });
 
@@ -908,18 +983,33 @@ export const useStore = create<AppState>()(
           const restored = restoreFromPackage(pkg);
           const jobId = getJobId(restored.job);
 
-          set({
-            job: restored.job,
-            currentTime: restored.currentTime,
-            camera: restored.camera,
-            annotations: restored.annotations,
-            ignoredRiskIds: restored.ignoredRiskIds,
-            showIgnored: restored.showIgnored,
-            riskLevelFilter: restored.riskLevelFilter,
-            templates: restored.templates,
-            currentJobId: jobId,
-            currentPackageId: packageId,
-            isPlaying: false,
+          const restoreLog = createLogEntry(pkg, "restore", true, "回放会话包成功");
+          const pkgWithLog = appendLogToPackage(pkg, restoreLog);
+
+          set((s) => {
+            const jobPackages = s.sessionPackages[pkg.jobId] || [];
+            const newPackages = jobPackages.map((p) =>
+              p.id === pkg.id ? pkgWithLog : p
+            );
+
+            return {
+              job: restored.job,
+              currentTime: restored.currentTime,
+              camera: restored.camera,
+              annotations: restored.annotations,
+              ignoredRiskIds: restored.ignoredRiskIds,
+              showIgnored: restored.showIgnored,
+              riskLevelFilter: restored.riskLevelFilter,
+              templates: restored.templates,
+              currentJobId: jobId,
+              currentPackageId: packageId,
+              isPlaying: false,
+              sessionPackages: {
+                ...s.sessionPackages,
+                [pkg.jobId]: newPackages,
+              },
+              sessionPackageLogs: [...s.sessionPackageLogs, restoreLog],
+            };
           });
 
           return { success: true };

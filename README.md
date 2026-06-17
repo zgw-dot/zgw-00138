@@ -18,6 +18,13 @@
   - 导入会话包自动恢复场景、批注、筛选、统计和相机视角；版本冲突时三选一处理（改名/覆盖/取消）
   - 批注或筛选条件变动后，旧包自动标记过期，无法继续导出
   - 所有操作（成功/失败/冲突/过期）记入本地操作日志，刷新或重开应用后仍可查询
+- **会话轨迹归档**：会话包从场景快照升级为可复盘全过程的完整档案
+  - 发布、覆盖、另存、撤回、导入冲突、取消导入、导入失败、恢复回放等所有动作均生成结构化操作记录
+  - 每条操作记录附带完整上下文：时间轴位置、相机视角、筛选条件、统计摘要、模板来源、导出产物
+  - 冲突处理分三步独立日志：弹窗出现（import_conflict_detected）→ 用户选择（import_conflict_cancel/rename/overwrite）→ 最终结果（import）
+  - 操作记录随会话包一起封包，导入或回放时包内历史日志自动同步回本地（按 ID 去重）
+  - 刷新页面或重开应用后，所有操作日志按时间顺序可追溯，操作链条完整可审计
+  - 包体内置整体校验和（checksum），防止内容篡改
 - **报告导出**：
   - JSON：完整作业元数据 + 轨迹 + 批注 + 快照信息
   - CSV：轨迹表格 + 批注表格，可直接用 Excel 打开
@@ -407,6 +414,157 @@ npm run check
   "checksum": "{包整体校验和}"         // 防篡改
 }
 ```
+
+---
+
+## 会话轨迹归档
+
+会话轨迹归档将会话包从单一的场景快照文件，升级为**可复盘全过程的完整档案**。每一次发布、覆盖、另存、撤回、导入、冲突处理、恢复回放等关键动作，都会生成**结构化操作记录**，连同操作时的完整上下文（时间轴、相机、筛选、统计、模板、导出产物）一起封入包内。导入或回放时，包内的历史操作记录会自动同步回本地日志，确保操作链条完整可追溯。
+
+### 操作记录数据模型
+
+每条操作记录 (`SessionPackageLogEntry`) 包含以下字段：
+
+```json
+{
+  "id": "log-xxx",
+  "packageId": "pkg-xxx",
+  "packageVersion": "1.0.0",
+  "packageName": "测试包",
+  "action": "publish",
+  "timestamp": "2024-01-01T12:00:00.000Z",
+  "success": true,
+  "message": "发布成功",
+  "context": {
+    "currentTime": 1500,
+    "camera": {
+      "position": [0, 50, 100],
+      "target": [0, 0, 0]
+    },
+    "filter": {
+      "riskLevel": { "safe": true, "warning": true, "danger": true },
+      "showIgnored": false,
+      "visibleAnnotationIds": ["ann-0", "ann-1"]
+    },
+    "riskStats": {
+      "total": 10,
+      "danger": 2,
+      "warning": 5,
+      "safe": 3,
+      "ignored": 0,
+      "visible": 10,
+      "exported": 10
+    },
+    "templateSourceIds": ["tpl-0"],
+    "exportedFiles": {
+      "json": true,
+      "csv": false
+    },
+    "conflictResolution": "overwrite",
+    "conflictNewVersion": "1.0.1",
+    "conflictExistingVersion": "1.0.0"
+  },
+  "details": { ... }
+}
+```
+
+### 动作类型
+
+所有会被记录的动作类型：
+
+| 动作类型 | 说明 | 触发时机 |
+|---------|------|---------|
+| `publish` | 发布 | 首次发布新会话包 |
+| `update` | 覆盖 | 覆盖更新已存在的版本 |
+| `save_as` | 另存 | 另存为新版本 |
+| `revoke` | 撤回 | 撤回最近一次发布 |
+| `import` | 导入 | 成功导入会话包 |
+| `import_failure` | 导入失败 | 导入校验失败或用户取消 |
+| `import_conflict_detected` | 冲突检测 | 导入时发现版本冲突（弹窗出现） |
+| `import_conflict_cancel` | 冲突取消 | 用户在冲突弹窗点击取消或关闭弹窗 |
+| `import_conflict_rename` | 冲突改名 | 用户选择改名导入 |
+| `import_conflict_overwrite` | 冲突覆盖 | 用户选择覆盖导入 |
+| `restore` | 恢复回放 | 从会话包恢复场景 |
+| `expire` | 过期 | 批注或筛选变动导致包过期 |
+
+### 冲突处理完整链路（三步独立日志）
+
+导入冲突时会生成**三条独立日志**，确保操作链条完整可追溯：
+
+1. **冲突检测**（`import_conflict_detected`）：发现版本冲突时立即记录，包含冲突的现有版本号
+2. **用户选择**（`import_conflict_cancel` / `import_conflict_rename` / `import_conflict_overwrite`）：用户做出选择后记录，包含选择的解决方式和新版本号（改名时）
+3. **最终结果**（`import` / `import_failure`）：导入完成后记录最终结果
+
+### 会话包内的操作日志
+
+会话包结构体新增 `operationLogs` 字段，所有历史操作记录随包一起导出：
+
+```json
+{
+  "id": "pkg-xxx",
+  "name": "测试包",
+  "version": "1.0.0",
+  "operationLogs": [
+    { "action": "publish", ... },
+    { "action": "update", ... },
+    { "action": "import_conflict_detected", ... },
+    { "action": "import_conflict_overwrite", ... },
+    { "action": "import", ... }
+  ],
+  "checksum": "xxx"
+}
+```
+
+### 导入时的日志合并
+
+导入会话包时，使用 `mergeLogsFromPackage` 函数自动合并包内日志到本地日志，按日志 ID 去重，避免重复记录：
+
+```
+本地日志 (导入前)  包内日志        合并后本地日志
+┌─────────────┐  ┌─────────────┐  ┌─────────────┐
+│ log-1 (pub)│  │ log-1 (pub)│  │ log-1 (pub)│  ← 去重保留
+│ log-2 (upd)│  │ log-3 (imp)│  │ log-2 (upd)│
+│             │  │ log-4 (res)│  │ log-3 (imp)│  ← 新增
+│             │  │             │  │ log-4 (res)│  ← 新增
+└─────────────┘  └─────────────┘  └─────────────┘
+```
+
+### 持久化与重启保留
+
+操作日志和会话包一起通过 Zustand persist 中间件持久化到 localStorage，键名 `sessionPackageLogs` 和 `sessionPackages`。刷新页面或重开应用后：
+
+- 所有会话包完整保留（含包内 operationLogs）
+- 所有本地操作日志完整保留
+- 日志按时间戳排序，操作链条完整可追溯
+- 恢复回放功能正常可用
+
+### 校验和防篡改
+
+会话包整体校验和 `checksum` 计算时包含 `operationLogs`，任何对操作记录的篡改都会导致校验失败。
+
+### 三条核心验证链路
+
+项目包含三条自动化验证测试位于 [import-export.test.ts](file:///d:/workSpace/AI__SPACE/02-label/zgw-00138/src/__tests__/import-export.test.ts#L4575-L4879)：
+
+1. **链路1：同版本冲突 → 取消**
+   - 发布会话包（含完整 context：camera、riskStats、filter、currentTime、templateSourceIds、exportedFiles
+   - 导入同版本包，触发冲突检测日志
+   - 用户取消导入，生成独立取消日志
+   - 验证日志顺序：publish → import_conflict_detected → import_conflict_cancel
+
+2. **链路2：冲突改名导入 / 覆盖导入**
+   - 发布 v1.0.0，导出序列化包
+   - 发布 v2.0.0
+   - 导入 v1.0.0 选择改名 → v1.0.1，验证完整日志链路
+   - 验证包内 operationLogs 包含所有历史日志
+   - 清空本地后重新创建同名包，导入时选择覆盖，验证覆盖日志链路
+
+3. **链路3：重启/刷新后保留**
+   - 发布会话包，恢复回放
+   - 手动持久化到 localStorage
+   - 模拟重启（setState 恢复）
+   - 验证：sessionPackages、sessionPackageLogs、回放能力全部保留
+   - 验证日志按时间顺序可查
 
 ---
 

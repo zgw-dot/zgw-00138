@@ -25,7 +25,11 @@ import {
 } from "lucide-react";
 import { useStore } from "@/store/useStore";
 import { downloadFile } from "@/utils/export";
-import { incrementVersion } from "@/utils/sessionPackage";
+import {
+  incrementVersion,
+  createConflictResolutionLog,
+  deserializePackage,
+} from "@/utils/sessionPackage";
 import type {
   ReviewSessionPackage,
   ImportConflictInfo,
@@ -320,6 +324,30 @@ export default function SessionPackageWorkbench() {
     [importPackageFromFile, showToast]
   );
 
+  const handleConflictCancel = useCallback(() => {
+    if (pendingImportContent && pendingConflict) {
+      const result = importPackageFromFile(
+        pendingImportContent,
+        "cancel",
+        undefined
+      );
+      if (!result.success && !result.conflict) {
+        showToast(
+          "error",
+          `记录取消日志失败: ${(result.errors || []).join(", ")}`
+        );
+      }
+    }
+    setDialog(null);
+    setPendingImportContent(null);
+    setPendingConflict(null);
+  }, [
+    pendingImportContent,
+    pendingConflict,
+    importPackageFromFile,
+    showToast,
+  ]);
+
   const handleConflictResolve = useCallback(() => {
     if (!pendingImportContent || !pendingConflict) return;
     const result = importPackageFromFile(
@@ -334,7 +362,7 @@ export default function SessionPackageWorkbench() {
           ? "覆盖导入成功"
           : conflictResolution === "rename"
           ? `重命名为 v${conflictNewVersion.trim()} 导入成功`
-          : "导入成功"
+          : "已取消导入"
       );
       setDialog(null);
       setPendingImportContent(null);
@@ -390,12 +418,24 @@ export default function SessionPackageWorkbench() {
         return "发布";
       case "update":
         return "覆盖更新";
+      case "save_as":
+        return "另存为";
       case "revoke":
         return "撤销发布";
       case "import":
         return "导入";
       case "import_failure":
         return "导入失败";
+      case "import_conflict_detected":
+        return "检测到冲突";
+      case "import_conflict_cancel":
+        return "冲突取消导入";
+      case "import_conflict_rename":
+        return "冲突改名导入";
+      case "import_conflict_overwrite":
+        return "冲突覆盖导入";
+      case "restore":
+        return "回放恢复";
       case "expire":
         return "标记过期";
       default:
@@ -1096,11 +1136,7 @@ export default function SessionPackageWorkbench() {
                 版本冲突
               </div>
               <button
-                onClick={() => {
-                  setDialog(null);
-                  setPendingImportContent(null);
-                  setPendingConflict(null);
-                }}
+                onClick={handleConflictCancel}
                 className="p-1 rounded hover:bg-[#162844] text-[#5A7A9E] hover:text-white"
               >
                 <X size={14} />
@@ -1196,11 +1232,7 @@ export default function SessionPackageWorkbench() {
             </div>
             <div className="flex gap-2">
               <button
-                onClick={() => {
-                  setDialog(null);
-                  setPendingImportContent(null);
-                  setPendingConflict(null);
-                }}
+                onClick={handleConflictCancel}
                 className="flex-1 px-3 py-2 rounded bg-[#162844] text-[#8BA4C7] text-sm hover:bg-[#1E3A5F] transition-colors"
               >
                 取消

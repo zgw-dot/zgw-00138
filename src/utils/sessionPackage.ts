@@ -5,11 +5,13 @@ import type {
   ReviewSessionPackage,
   SessionPackageLogEntry,
   SessionPackageActionType,
+  SessionPackageLogContext,
   DataSignature,
   ImportConflictInfo,
   ImportResolution,
   RiskLevelFilter,
   CameraState,
+  ExportSnapshotFilter,
 } from "@/types";
 import {
   createSnapshot,
@@ -69,9 +71,62 @@ function computePackageChecksum(pkg: ReviewSessionPackage): string {
     version: pkg.version,
     snapshot: pkg.snapshot,
     templateSources: pkg.templateSources,
+    operationLogs: pkg.operationLogs,
     createdAt: pkg.createdAt,
   });
   return hashString(content);
+}
+
+function buildLogContext(
+  currentTime: number,
+  camera: CameraState,
+  showIgnored: boolean,
+  riskLevelFilter: RiskLevelFilter,
+  ignoredRiskIds: string[],
+  annotations: Annotation[],
+  templates: AnnotationTemplate[]
+): SessionPackageLogContext {
+  const total = annotations.length;
+  const danger = annotations.filter((a) => a.riskLevel === "danger").length;
+  const warning = annotations.filter((a) => a.riskLevel === "warning").length;
+  const safe = annotations.filter((a) => a.riskLevel === "safe").length;
+  const ignored = ignoredRiskIds.length;
+  const visible = annotations.filter((a) => {
+    if (!showIgnored && ignoredRiskIds.includes(a.id)) return false;
+    if (!riskLevelFilter[a.riskLevel]) return false;
+    return true;
+  }).length;
+
+  const filter: ExportSnapshotFilter = {
+    showIgnored,
+    riskLevelFilter: { ...riskLevelFilter },
+    ignoredRiskIds: [...ignoredRiskIds],
+  };
+
+  const usedTemplateIds = Array.from(
+    new Set(
+      annotations
+        .filter((a) => a.templateSourceId)
+        .map((a) => a.templateSourceId!)
+    )
+  );
+
+  return {
+    currentTime,
+    camera: { position: [...camera.position] as [number, number, number], target: [...camera.target] as [number, number, number] },
+    filter,
+    riskStats: {
+      total,
+      danger,
+      warning,
+      safe,
+      ignored,
+      visible,
+      exported: visible,
+    },
+    templateSourceIds: usedTemplateIds,
+    exportedFiles: { json: true, csv: true },
+  };
 }
 
 export function createSessionPackage(
@@ -135,6 +190,7 @@ export function createSessionPackage(
     },
     signature: signature.combinedHash,
     templateSources: usedTemplates,
+    operationLogs: [],
     checksum: "",
   };
 
@@ -199,6 +255,7 @@ export function updateSessionPackage(
     },
     signature: signature.combinedHash,
     templateSources: usedTemplates,
+    operationLogs: existing.operationLogs ? [...existing.operationLogs] : [],
     checksum: "",
   };
 
@@ -274,6 +331,7 @@ export function createLogEntry(
   action: SessionPackageActionType,
   success: boolean,
   message: string,
+  context?: SessionPackageLogContext,
   details?: Record<string, unknown>
 ): SessionPackageLogEntry {
   return {
@@ -285,6 +343,7 @@ export function createLogEntry(
     timestamp: new Date().toISOString(),
     success,
     message,
+    context,
     details,
   };
 }
@@ -306,6 +365,85 @@ export function createImportFailureLog(
     message,
     details,
   };
+}
+
+export function createConflictDetectedLog(
+  existingPkg: ReviewSessionPackage,
+  incomingPkg: ReviewSessionPackage
+): SessionPackageLogEntry {
+  return {
+    id: generateLogId(),
+    packageId: incomingPkg.id,
+    packageVersion: incomingPkg.version,
+    packageName: incomingPkg.name,
+    action: "import_conflict_detected",
+    timestamp: new Date().toISOString(),
+    success: true,
+    message: `检测到版本冲突：现有 v${existingPkg.version} vs 待导入 v${incomingPkg.version}`,
+    context: {
+      conflictExistingVersion: existingPkg.version,
+    },
+    details: {
+      existingPackageId: existingPkg.id,
+      existingCreatedAt: existingPkg.createdAt,
+      incomingCreatedAt: incomingPkg.createdAt,
+    },
+  };
+}
+
+export function createConflictResolutionLog(
+  incomingPkg: ReviewSessionPackage,
+  resolution: ImportResolution,
+  newVersion?: string
+): SessionPackageLogEntry {
+  const actionMap: Record<ImportResolution, SessionPackageActionType> = {
+    cancel: "import_conflict_cancel",
+    rename: "import_conflict_rename",
+    overwrite: "import_conflict_overwrite",
+  };
+
+  const messageMap: Record<ImportResolution, string> = {
+    cancel: "用户取消导入，跳过此包",
+    rename: `用户选择改名导入，新版本号 v${newVersion || incomingPkg.version}`,
+    overwrite: "用户选择覆盖现有版本",
+  };
+
+  return {
+    id: generateLogId(),
+    packageId: incomingPkg.id,
+    packageVersion: newVersion || incomingPkg.version,
+    packageName: incomingPkg.name,
+    action: actionMap[resolution],
+    timestamp: new Date().toISOString(),
+    success: resolution !== "cancel",
+    message: messageMap[resolution],
+    context: {
+      conflictResolution: resolution,
+      conflictNewVersion: newVersion,
+    },
+  };
+}
+
+export function appendLogToPackage(
+  pkg: ReviewSessionPackage,
+  log: SessionPackageLogEntry
+): ReviewSessionPackage {
+  const updated: ReviewSessionPackage = {
+    ...pkg,
+    operationLogs: [...(pkg.operationLogs || []), log],
+    checksum: "",
+  };
+  updated.checksum = computePackageChecksum(updated);
+  return updated;
+}
+
+export function mergeLogsFromPackage(
+  existingLogs: SessionPackageLogEntry[],
+  pkg: ReviewSessionPackage
+): SessionPackageLogEntry[] {
+  const existingIds = new Set(existingLogs.map((l) => l.id));
+  const newLogs = (pkg.operationLogs || []).filter((l) => !existingIds.has(l.id));
+  return [...existingLogs, ...newLogs];
 }
 
 export function serializePackage(pkg: ReviewSessionPackage): string {
@@ -335,6 +473,7 @@ export function validatePackageStructure(raw: unknown): { valid: boolean; errors
     "exportedFiles",
     "signature",
     "templateSources",
+    "operationLogs",
     "checksum",
   ];
 
@@ -465,4 +604,7 @@ export function incrementVersion(version: string): string {
   return `${version}.1`;
 }
 
-export { computeDataSignature };
+export {
+  computeDataSignature,
+  buildLogContext,
+};

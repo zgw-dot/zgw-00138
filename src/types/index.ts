@@ -148,16 +148,46 @@ export interface ReviewSessionPackage {
   exportedFiles: ExportedFiles;
   signature: string;
   templateSources: AnnotationTemplate[];
+  operationLogs: SessionPackageLogEntry[];
   checksum: string;
 }
 
 export type SessionPackageActionType =
   | "publish"
   | "update"
+  | "save_as"
   | "revoke"
   | "import"
   | "import_failure"
+  | "import_conflict_detected"
+  | "import_conflict_cancel"
+  | "import_conflict_rename"
+  | "import_conflict_overwrite"
+  | "restore"
   | "expire";
+
+export interface SessionPackageLogContext {
+  currentTime?: number;
+  camera?: CameraState;
+  filter?: ExportSnapshotFilter;
+  riskStats?: {
+    total: number;
+    danger: number;
+    warning: number;
+    safe: number;
+    ignored: number;
+    visible: number;
+    exported: number;
+  };
+  templateSourceIds?: string[];
+  exportedFiles?: {
+    json?: boolean;
+    csv?: boolean;
+  };
+  conflictResolution?: ImportResolution;
+  conflictNewVersion?: string;
+  conflictExistingVersion?: string;
+}
 
 export interface SessionPackageLogEntry {
   id: string;
@@ -168,6 +198,7 @@ export interface SessionPackageLogEntry {
   timestamp: string;
   success: boolean;
   message: string;
+  context?: SessionPackageLogContext;
   details?: Record<string, unknown>;
 }
 

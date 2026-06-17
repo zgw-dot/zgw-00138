@@ -4572,3 +4572,309 @@ describe("sessionPackage - Store集成测试", () => {
   });
 });
 
+describe("session-trail-archive - 会话轨迹归档三条核心链路验证", () => {
+  beforeEach(() => {
+    const state = useStore.getState();
+    state.setJob(null);
+    state.annotations.forEach((a) => state.removeAnnotation(a.id));
+    state.setShowIgnored(true);
+    state.setRiskLevelFilter({ safe: true, warning: true, danger: true });
+    state.ignoredRiskIds.forEach((id) => state.toggleIgnoreRisk(id));
+    useStore.setState({
+      currentSnapshotId: null,
+      currentPackageId: null,
+      lastPublishId: null,
+      sessionPackages: {},
+      sessionPackageLogs: [],
+    });
+    localStorage.clear();
+  });
+
+  it("链路1: 同版本冲突 -> 取消，生成独立日志并持久化", () => {
+    const store = useStore.getState();
+    const job = makeTestJob();
+    store.setJob(job);
+    const annotations = makeTestAnnotations(2);
+    store.addAnnotation(annotations[0]);
+    store.addAnnotation(annotations[1]);
+    store.setCurrentTime(1500);
+
+    const pkg = store.publishSessionPackage("冲突取消测试包", "1.0.0");
+    expect(pkg.operationLogs).toBeDefined();
+    expect(pkg.operationLogs.length).toBeGreaterThanOrEqual(1);
+    expect(pkg.operationLogs[0].action).toBe("publish");
+    expect(pkg.operationLogs[0].context).toBeDefined();
+    expect(pkg.operationLogs[0].context?.camera).toBeDefined();
+    expect(pkg.operationLogs[0].context?.currentTime).toBe(1500);
+    expect(pkg.operationLogs[0].context?.riskStats).toBeDefined();
+    expect(pkg.operationLogs[0].context?.filter).toBeDefined();
+    expect(pkg.operationLogs[0].context?.templateSourceIds).toBeDefined();
+
+    const serialized = store.exportPackageToFile(pkg.id);
+    const detectResult = store.importPackageFromFile(serialized);
+    expect(detectResult.success).toBe(false);
+    expect(detectResult.conflict).toBeDefined();
+
+    const logsAfterDetect = store.getPackageLogs();
+    expect(logsAfterDetect.some((l) => l.action === "import_conflict_detected")).toBe(true);
+    const detectedLog = logsAfterDetect.find((l) => l.action === "import_conflict_detected");
+    expect(detectedLog?.context?.conflictExistingVersion).toBe("1.0.0");
+
+    const cancelResult = store.importPackageFromFile(serialized, "cancel");
+    expect(cancelResult.success).toBe(false);
+
+    const finalLogs = store.getPackageLogs();
+    const cancelLogs = finalLogs.filter((l) => l.action === "import_conflict_cancel");
+    expect(cancelLogs.length).toBeGreaterThanOrEqual(1);
+    expect(cancelLogs[cancelLogs.length - 1].context?.conflictResolution).toBe("cancel");
+    expect(cancelLogs[cancelLogs.length - 1].success).toBe(false);
+
+    const publishLog = finalLogs.find((l) => l.action === "publish");
+    expect(publishLog).toBeDefined();
+    expect(publishLog?.context).toBeDefined();
+    expect(publishLog?.context?.exportedFiles).toBeDefined();
+    expect(publishLog?.context?.exportedFiles?.json).toBe(true);
+
+    const allLogsSorted = [...finalLogs].sort(
+      (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
+    );
+    const actionSequence = allLogsSorted.map((l) => l.action);
+    expect(actionSequence).toContain("publish");
+    expect(actionSequence).toContain("import_conflict_detected");
+    expect(actionSequence).toContain("import_conflict_cancel");
+    expect(actionSequence.indexOf("import_conflict_detected")).toBeLessThan(
+      actionSequence.indexOf("import_conflict_cancel")
+    );
+  });
+
+  it("链路2: 冲突改名导入 / 覆盖导入，完整日志链路且包内日志同步", () => {
+    const store = useStore.getState();
+    const job = makeTestJob();
+    store.setJob(job);
+    const annotations = makeTestAnnotations(3);
+    annotations.forEach((a) => store.addAnnotation(a));
+    store.setCurrentTime(2000);
+
+    const pkgV1 = store.publishSessionPackage("改名测试包", "1.0.0");
+    const serializedV1 = store.exportPackageToFile(pkgV1.id);
+
+    store.addAnnotation({
+      id: "ann-extra",
+      timestamp: 4000,
+      position: [0, 0, 0] as [number, number, number],
+      riskLevel: "warning",
+      text: "额外批注",
+      ignored: false,
+      createdAt: new Date().toISOString(),
+    });
+    store.publishSessionPackage("改名测试包", "2.0.0");
+
+    const renameResult = store.importPackageFromFile(serializedV1, "rename", "1.0.1");
+    expect(renameResult.success).toBe(true);
+    expect(renameResult.package?.version).toBe("1.0.1");
+
+    const logsAfterRename = store.getPackageLogs();
+    expect(logsAfterRename.some((l) => l.action === "import_conflict_detected")).toBe(true);
+    expect(logsAfterRename.some((l) => l.action === "import_conflict_rename")).toBe(true);
+    expect(logsAfterRename.some((l) => l.action === "import")).toBe(true);
+
+    const renameLog = logsAfterRename.find((l) => l.action === "import_conflict_rename");
+    expect(renameLog?.context?.conflictResolution).toBe("rename");
+    expect(renameLog?.context?.conflictNewVersion).toBe("1.0.1");
+
+    const importedPkgLogs = renameResult.package?.operationLogs || [];
+    expect(importedPkgLogs.some((l) => l.action === "publish")).toBe(true);
+    expect(importedPkgLogs.some((l) => l.action === "import_conflict_detected")).toBe(true);
+    expect(importedPkgLogs.some((l) => l.action === "import_conflict_rename")).toBe(true);
+    expect(importedPkgLogs.some((l) => l.action === "import")).toBe(true);
+
+    const serializedPkg = serializePackage(renameResult.package!);
+    useStore.setState({
+      sessionPackages: {},
+      sessionPackageLogs: [],
+      currentPackageId: null,
+    });
+    store.setJob(job);
+
+    store.publishSessionPackage("改名测试包", "1.0.1");
+
+    const overwriteResult = store.importPackageFromFile(serializedPkg, "overwrite");
+    expect(overwriteResult.success).toBe(true);
+
+    const logsAfterOverwrite = store.getPackageLogs();
+    expect(logsAfterOverwrite.some((l) => l.action === "import_conflict_detected")).toBe(true);
+    expect(logsAfterOverwrite.some((l) => l.action === "import_conflict_overwrite")).toBe(true);
+    expect(logsAfterOverwrite.some((l) => l.action === "import")).toBe(true);
+
+    const overwriteLog = logsAfterOverwrite.find((l) => l.action === "import_conflict_overwrite");
+    expect(overwriteLog?.context?.conflictResolution).toBe("overwrite");
+
+    const overwriteLogsSorted = [...logsAfterOverwrite].sort(
+      (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
+    );
+    const overwriteSequence = overwriteLogsSorted.map((l) => l.action);
+    expect(overwriteSequence.indexOf("import_conflict_detected")).toBeLessThan(
+      overwriteSequence.indexOf("import_conflict_overwrite")
+    );
+    expect(overwriteSequence.indexOf("import_conflict_overwrite")).toBeLessThan(
+      overwriteSequence.lastIndexOf("import")
+    );
+  });
+
+  it("链路3: 重启/刷新后，会话包、操作日志、回放都完整保留", () => {
+    const store = useStore.getState();
+    const job = makeTestJob();
+    store.setJob(job);
+    const annotations: Annotation[] = [
+      {
+        id: "ann-0",
+        timestamp: 1000,
+        position: [0, 0, 0] as [number, number, number],
+        riskLevel: "danger",
+        text: "危险批注",
+        ignored: false,
+        createdAt: new Date().toISOString(),
+      },
+      {
+        id: "ann-1",
+        timestamp: 2000,
+        position: [0, 0, 0] as [number, number, number],
+        riskLevel: "danger",
+        text: "另一条危险",
+        ignored: false,
+        createdAt: new Date().toISOString(),
+      },
+      {
+        id: "ann-2",
+        timestamp: 3000,
+        position: [0, 0, 0] as [number, number, number],
+        riskLevel: "warning",
+        text: "警告1",
+        ignored: false,
+        createdAt: new Date().toISOString(),
+      },
+      {
+        id: "ann-3",
+        timestamp: 4000,
+        position: [0, 0, 0] as [number, number, number],
+        riskLevel: "warning",
+        text: "警告2",
+        ignored: false,
+        createdAt: new Date().toISOString(),
+      },
+      {
+        id: "ann-4",
+        timestamp: 5000,
+        position: [0, 0, 0] as [number, number, number],
+        riskLevel: "warning",
+        text: "警告3",
+        ignored: false,
+        createdAt: new Date().toISOString(),
+      },
+    ];
+    annotations.forEach((a) => store.addAnnotation(a));
+    store.setCurrentTime(2500);
+    store.setCamera({ position: [10, 50, 20] as [number, number, number], target: [0, 0, 0] as [number, number, number] });
+    store.setShowIgnored(false);
+    store.setRiskLevelFilter({ safe: true, warning: true, danger: true });
+    store.toggleIgnoreRisk("ann-0");
+
+    const pkg = store.publishSessionPackage("重启保留包", "1.0.0");
+    const restoreBeforePersist = store.restoreFromPackage(pkg.id);
+    expect(restoreBeforePersist.success).toBe(true);
+
+    const stateBefore = useStore.getState();
+    const jobKey = `${job.meta.name}-${job.meta.date}-${job.meta.craneId}`;
+    const packagesBefore = stateBefore.sessionPackages[jobKey] || [];
+    expect(packagesBefore.length).toBe(1);
+    expect(packagesBefore[0].operationLogs.length).toBeGreaterThanOrEqual(2);
+
+    const logsBefore = stateBefore.getPackageLogs();
+    expect(logsBefore.some((l) => l.action === "publish")).toBe(true);
+    expect(logsBefore.some((l) => l.action === "restore")).toBe(true);
+
+    const persistedData = {
+      job: stateBefore.job,
+      camera: stateBefore.camera,
+      annotations: stateBefore.annotations,
+      ignoredRiskIds: stateBefore.ignoredRiskIds,
+      showIgnored: stateBefore.showIgnored,
+      riskLevelFilter: stateBefore.riskLevelFilter,
+      sessionPackages: stateBefore.sessionPackages,
+      sessionPackageLogs: stateBefore.sessionPackageLogs,
+      currentPackageId: stateBefore.currentPackageId,
+      currentJobId: jobKey,
+      templates: (stateBefore as any).templates ?? [],
+      snapshots: (stateBefore as any).snapshots ?? {},
+    };
+    expect(persistedData.sessionPackages).toBeDefined();
+    expect(persistedData.sessionPackageLogs).toBeDefined();
+    expect(persistedData.currentPackageId).toBe(pkg.id);
+
+    const pkgFromPersist = (persistedData.sessionPackages[jobKey] || [])[0];
+    expect(pkgFromPersist).toBeDefined();
+    expect(pkgFromPersist.operationLogs.length).toBeGreaterThanOrEqual(2);
+    expect(persistedData.sessionPackageLogs.length).toBe(logsBefore.length);
+
+    const stateToPersist = {
+      state: persistedData,
+    };
+    localStorage.setItem("crane-replay-storage", JSON.stringify(stateToPersist));
+
+    useStore.setState({
+      job: stateToPersist.state.job,
+      camera: stateToPersist.state.camera,
+      annotations: stateToPersist.state.annotations,
+      ignoredRiskIds: stateToPersist.state.ignoredRiskIds,
+      showIgnored: stateToPersist.state.showIgnored,
+      riskLevelFilter: stateToPersist.state.riskLevelFilter,
+      currentTime: 2500,
+      isPlaying: false,
+      sessionPackages: stateToPersist.state.sessionPackages,
+      sessionPackageLogs: stateToPersist.state.sessionPackageLogs,
+      currentPackageId: stateToPersist.state.currentPackageId,
+      currentJobId: stateToPersist.state.currentJobId,
+      currentSnapshotId: null,
+      snapshotHistory: [],
+      templates: stateToPersist.state.templates,
+      snapshots: stateToPersist.state.snapshots,
+    });
+
+    const stateAfter = useStore.getState();
+    expect(stateAfter.currentPackageId).toBe(pkg.id);
+
+    const logsAfter = stateAfter.getPackageLogs();
+    expect(logsAfter.length).toBe(logsBefore.length);
+    expect(logsAfter.every((l, i) => l.id === logsBefore[i].id)).toBe(true);
+
+    const packagesAfter = stateAfter.sessionPackages[jobKey] || [];
+    expect(packagesAfter.length).toBe(1);
+    expect(packagesAfter[0].operationLogs.length).toBe(packagesBefore[0].operationLogs.length);
+
+    const restoreResult = stateAfter.restoreFromPackage(pkg.id);
+    expect(restoreResult.success).toBe(true);
+
+    const stateFinal = useStore.getState();
+    expect(stateFinal.job?.meta.name).toBe(job.meta.name);
+    expect(stateFinal.annotations.length).toBe(5);
+    expect(stateFinal.currentTime).toBe(2500);
+    expect(stateFinal.camera.position).toEqual([10, 50, 20]);
+    expect(stateFinal.showIgnored).toBe(false);
+    expect(stateFinal.ignoredRiskIds).toContain("ann-0");
+    expect(stateFinal.riskLevelFilter.safe).toBe(true);
+    expect(stateFinal.riskLevelFilter.warning).toBe(true);
+    expect(stateFinal.riskLevelFilter.danger).toBe(true);
+
+    const finalLogs = stateFinal.getPackageLogs();
+    expect(finalLogs.some((l) => l.action === "restore")).toBe(true);
+    expect(finalLogs.filter((l) => l.action === "restore").length).toBeGreaterThanOrEqual(2);
+
+    const finalLogsSorted = [...finalLogs].sort(
+      (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
+    );
+    const finalActions = finalLogsSorted.map((l) => l.action);
+    expect(finalActions[0]).toBe("publish");
+    expect(finalActions).toContain("restore");
+  });
+});
+
