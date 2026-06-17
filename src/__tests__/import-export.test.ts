@@ -1,4 +1,40 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
+
+const mockLocalStorage = (() => {
+  let store: Record<string, string> = {};
+  const storage = {
+    getItem: (key: string) => (key in store ? store[key] : null),
+    setItem: (key: string, value: string) => {
+      store[key] = String(value);
+    },
+    removeItem: (key: string) => {
+      delete store[key];
+    },
+    clear: () => {
+      store = {};
+    },
+    get length() {
+      return Object.keys(store).length;
+    },
+    key: (index: number) => {
+      const keys = Object.keys(store);
+      return index >= 0 && index < keys.length ? keys[index] : null;
+    },
+  };
+  return storage;
+})();
+
+try {
+  Object.defineProperty(window, "localStorage", {
+    value: mockLocalStorage,
+    writable: true,
+    configurable: true,
+  });
+} catch (e) {
+  // ignore if window is not available
+}
+
+vi.stubGlobal("localStorage", mockLocalStorage);
 import { precheckJob, sanitizeJob } from "@/utils/validation";
 import {
   exportToJSON,
@@ -1111,9 +1147,9 @@ describe("regression - infinite re-render / white screen", () => {
     const snapshot = store.getState().createExportSnapshot("稳定性测试");
     store.getState().saveSnapshot(snapshot);
 
-    let canUndoCallCount = 0;
-    let filterChangedCallCount = 0;
-    let snapshotListCallCount = 0;
+    const canUndoCallCount = 0;
+    const filterChangedCallCount = 0;
+    const snapshotListCallCount = 0;
 
     const subscribeSelect = <T,>(
       selector: (s: ReturnType<typeof store.getState>) => T,
@@ -3078,3 +3114,1461 @@ describe("resolveTemplateName - annotation.templateSourceName takes priority", (
     expect(parsed.annotations[0].templateName).toBeNull();
   });
 });
+
+import {
+  createSessionPackage,
+  updateSessionPackage,
+  markPackageExpired,
+  checkPackageExpired,
+  canExportPackage,
+  verifyPackageChecksum,
+  serializePackage,
+  deserializePackage,
+  validatePackageStructure,
+  checkImportConflict,
+  resolveImportConflict,
+  restoreFromPackage,
+  incrementVersion,
+  computeDataSignature,
+  createLogEntry,
+  createImportFailureLog,
+} from "@/utils/sessionPackage";
+import type {
+  SessionPackageActionType,
+  CameraState,
+  AnnotationTemplate,
+} from "@/types";
+import { useStore } from "@/store/useStore";
+
+const defaultCamera: CameraState = {
+  position: [0, 80, 0.1] as [number, number, number],
+  target: [0, 0, 0] as [number, number, number],
+};
+
+const defaultRiskFilter: RiskLevelFilter = {
+  safe: true,
+  warning: true,
+  danger: true,
+};
+
+function makeTestJob(): LiftingJob {
+  return {
+    meta: {
+      name: "测试作业",
+      date: "2025-01-01",
+      craneId: "CR-001",
+      craneType: "塔式起重机",
+      siteName: "测试工地",
+    },
+    crane: {
+      position: [0, 0, 0] as [number, number, number],
+      boomLength: 30,
+      boomAngle: 60,
+      maxRadius: 35,
+    },
+    restrictedZones: [
+      {
+        id: "zone-1",
+        name: "高压线",
+        type: "box",
+        position: [20, 8, -5] as [number, number, number],
+        size: { width: 6, height: 16, depth: 4 },
+      },
+    ],
+    trajectory: [
+      {
+        timestamp: 0,
+        hookPosition: [5, 25, 0] as [number, number, number],
+        boomAngle: 60,
+        load: 0,
+        radius: 5,
+        riskLevel: "safe",
+      },
+    ],
+  };
+}
+
+function makeTestAnnotations(count: number = 3): Annotation[] {
+  return Array.from({ length: count }, (_, i) => ({
+    id: `ann-${i}`,
+    timestamp: i * 1000,
+    position: [0, 0, 0] as [number, number, number],
+    riskLevel: i % 2 === 0 ? "warning" : "danger",
+    text: `批注 ${i}`,
+    ignored: false,
+    createdAt: new Date().toISOString(),
+  }));
+}
+
+function makeTestTemplates(): AnnotationTemplate[] {
+  return [
+    {
+      id: "tpl-1",
+      name: "常规警告",
+      defaultRiskLevel: "warning",
+      defaultText: "请注意安全",
+      createdAt: new Date().toISOString(),
+    },
+    {
+      id: "tpl-2",
+      name: "严重危险",
+      defaultRiskLevel: "danger",
+      defaultText: "立即停止作业",
+      createdAt: new Date().toISOString(),
+    },
+  ];
+}
+
+describe("sessionPackage - 数据签名计算", () => {
+  it("相同数据生成相同签名", () => {
+    const annotations = makeTestAnnotations(3);
+    const sig1 = computeDataSignature(annotations, true, defaultRiskFilter, []);
+    const sig2 = computeDataSignature(annotations, true, defaultRiskFilter, []);
+    expect(sig1.combinedHash).toBe(sig2.combinedHash);
+    expect(sig1.annotationsHash).toBe(sig2.annotationsHash);
+    expect(sig1.filterHash).toBe(sig2.filterHash);
+  });
+
+  it("批注变更导致签名变化", () => {
+    const ann1 = makeTestAnnotations(3);
+    const ann2 = makeTestAnnotations(3);
+    ann2[0].text = "修改后的批注";
+    const sig1 = computeDataSignature(ann1, true, defaultRiskFilter, []);
+    const sig2 = computeDataSignature(ann2, true, defaultRiskFilter, []);
+    expect(sig1.annotationsHash).not.toBe(sig2.annotationsHash);
+    expect(sig1.combinedHash).not.toBe(sig2.combinedHash);
+  });
+
+  it("筛选条件变更导致签名变化", () => {
+    const annotations = makeTestAnnotations(3);
+    const filter1: RiskLevelFilter = { safe: true, warning: true, danger: true };
+    const filter2: RiskLevelFilter = { safe: false, warning: true, danger: true };
+    const sig1 = computeDataSignature(annotations, true, filter1, []);
+    const sig2 = computeDataSignature(annotations, true, filter2, []);
+    expect(sig1.filterHash).not.toBe(sig2.filterHash);
+    expect(sig1.combinedHash).not.toBe(sig2.combinedHash);
+  });
+});
+
+describe("sessionPackage - 创建与会话包", () => {
+  it("创建会话包包含所有必需字段", () => {
+    const job = makeTestJob();
+    const annotations = makeTestAnnotations(3);
+    const templates = makeTestTemplates();
+
+    const pkg = createSessionPackage(
+      job,
+      annotations,
+      1000,
+      defaultCamera,
+      true,
+      defaultRiskFilter,
+      [],
+      templates,
+      "测试包",
+      "1.0.0"
+    );
+
+    expect(pkg.id).toBeDefined();
+    expect(pkg.version).toBe("1.0.0");
+    expect(pkg.name).toBe("测试包");
+    expect(pkg.isExpired).toBe(false);
+    expect(pkg.createdAt).toBeDefined();
+    expect(pkg.updatedAt).toBeDefined();
+    expect(pkg.signature).toBeDefined();
+    expect(pkg.checksum).toBeDefined();
+    expect(pkg.exportedFiles.json).toBeDefined();
+    expect(pkg.exportedFiles.csv).toBeDefined();
+    expect(pkg.snapshot.annotations).toHaveLength(3);
+    expect(pkg.jobMeta.name).toBe("测试作业");
+  });
+
+  it("校验和验证正常工作", () => {
+    const job = makeTestJob();
+    const annotations = makeTestAnnotations(3);
+    const templates = makeTestTemplates();
+
+    const pkg = createSessionPackage(
+      job,
+      annotations,
+      1000,
+      defaultCamera,
+      true,
+      defaultRiskFilter,
+      [],
+      templates,
+      "测试包",
+      "1.0.0"
+    );
+
+    expect(verifyPackageChecksum(pkg)).toBe(true);
+  });
+
+  it("篡改数据后校验和验证失败", () => {
+    const job = makeTestJob();
+    const annotations = makeTestAnnotations(3);
+    const templates = makeTestTemplates();
+
+    const pkg = createSessionPackage(
+      job,
+      annotations,
+      1000,
+      defaultCamera,
+      true,
+      defaultRiskFilter,
+      [],
+      templates,
+      "测试包",
+      "1.0.0"
+    );
+
+    const tampered = { ...pkg, version: "2.0.0" };
+    expect(verifyPackageChecksum(tampered)).toBe(false);
+  });
+
+  it("模板来源正确关联", () => {
+    const job = makeTestJob();
+    const templates = makeTestTemplates();
+    const annotations: Annotation[] = [
+      {
+        id: "ann-1",
+        timestamp: 1000,
+        position: [0, 0, 0] as [number, number, number],
+        riskLevel: "warning",
+        text: "使用模板的批注",
+        ignored: false,
+        createdAt: new Date().toISOString(),
+        templateSourceId: "tpl-1",
+      },
+      {
+        id: "ann-2",
+        timestamp: 2000,
+        position: [0, 0, 0] as [number, number, number],
+        riskLevel: "danger",
+        text: "不使用模板的批注",
+        ignored: false,
+        createdAt: new Date().toISOString(),
+      },
+    ];
+
+    const pkg = createSessionPackage(
+      job,
+      annotations,
+      1000,
+      defaultCamera,
+      true,
+      defaultRiskFilter,
+      [],
+      templates,
+      "测试包",
+      "1.0.0"
+    );
+
+    expect(pkg.templateSources).toHaveLength(1);
+    expect(pkg.templateSources[0].id).toBe("tpl-1");
+  });
+});
+
+describe("sessionPackage - 更新会话包", () => {
+  it("更新会话包保留原有ID", () => {
+    const job = makeTestJob();
+    const annotations = makeTestAnnotations(3);
+    const templates = makeTestTemplates();
+
+    const original = createSessionPackage(
+      job,
+      annotations,
+      1000,
+      defaultCamera,
+      true,
+      defaultRiskFilter,
+      [],
+      templates,
+      "测试包",
+      "1.0.0"
+    );
+
+    const originalId = original.id;
+    const newAnnotations = [...annotations, {
+      id: "ann-new",
+      timestamp: 5000,
+      position: [0, 0, 0] as [number, number, number],
+      riskLevel: "safe" as const,
+      text: "新增批注",
+      ignored: false,
+      createdAt: new Date().toISOString(),
+    }];
+
+    const updated = updateSessionPackage(
+      original,
+      job,
+      newAnnotations,
+      2000,
+      defaultCamera,
+      true,
+      defaultRiskFilter,
+      [],
+      templates,
+      "1.0.1"
+    );
+
+    expect(updated.id).toBe(originalId);
+    expect(updated.version).toBe("1.0.1");
+    expect(updated.snapshot.annotations).toHaveLength(4);
+    expect(updated.signature).not.toBe(original.signature);
+  });
+
+  it("更新时不指定版本则保留原版本", () => {
+    const job = makeTestJob();
+    const annotations = makeTestAnnotations(3);
+    const templates = makeTestTemplates();
+
+    const original = createSessionPackage(
+      job,
+      annotations,
+      1000,
+      defaultCamera,
+      true,
+      defaultRiskFilter,
+      [],
+      templates,
+      "测试包",
+      "1.0.0"
+    );
+
+    const updated = updateSessionPackage(
+      original,
+      job,
+      annotations,
+      2000,
+      defaultCamera,
+      true,
+      defaultRiskFilter,
+      [],
+      templates
+    );
+
+    expect(updated.version).toBe("1.0.0");
+  });
+});
+
+describe("sessionPackage - 过期检测与标记", () => {
+  it("手动标记包过期", () => {
+    const job = makeTestJob();
+    const annotations = makeTestAnnotations(3);
+    const templates = makeTestTemplates();
+
+    const pkg = createSessionPackage(
+      job,
+      annotations,
+      1000,
+      defaultCamera,
+      true,
+      defaultRiskFilter,
+      [],
+      templates,
+      "测试包",
+      "1.0.0"
+    );
+
+    const expired = markPackageExpired(pkg, "测试过期原因");
+    expect(expired.isExpired).toBe(true);
+    expect(expired.expiredReason).toBe("测试过期原因");
+    expect(expired.expiredAt).toBeDefined();
+  });
+
+  it("批注变更检测到过期", () => {
+    const job = makeTestJob();
+    const annotations = makeTestAnnotations(3);
+    const templates = makeTestTemplates();
+
+    const pkg = createSessionPackage(
+      job,
+      annotations,
+      1000,
+      defaultCamera,
+      true,
+      defaultRiskFilter,
+      [],
+      templates,
+      "测试包",
+      "1.0.0"
+    );
+
+    const modifiedAnnotations = annotations.map((a, i) =>
+      i === 0 ? { ...a, text: "修改后的文本" } : a
+    );
+
+    const check = checkPackageExpired(
+      pkg,
+      modifiedAnnotations,
+      true,
+      defaultRiskFilter,
+      []
+    );
+
+    expect(check.expired).toBe(true);
+    expect(check.reason).toBe("批注数据已变更");
+  });
+
+  it("筛选条件变更检测到过期", () => {
+    const job = makeTestJob();
+    const annotations = makeTestAnnotations(3);
+    const templates = makeTestTemplates();
+
+    const pkg = createSessionPackage(
+      job,
+      annotations,
+      1000,
+      defaultCamera,
+      true,
+      defaultRiskFilter,
+      [],
+      templates,
+      "测试包",
+      "1.0.0"
+    );
+
+    const modifiedFilter: RiskLevelFilter = {
+      safe: false,
+      warning: true,
+      danger: true,
+    };
+
+    const check = checkPackageExpired(
+      pkg,
+      annotations,
+      true,
+      modifiedFilter,
+      []
+    );
+
+    expect(check.expired).toBe(true);
+    expect(check.reason).toBe("筛选条件已变更");
+  });
+
+  it("已过期的包再次检查仍为过期", () => {
+    const job = makeTestJob();
+    const annotations = makeTestAnnotations(3);
+    const templates = makeTestTemplates();
+
+    const pkg = createSessionPackage(
+      job,
+      annotations,
+      1000,
+      defaultCamera,
+      true,
+      defaultRiskFilter,
+      [],
+      templates,
+      "测试包",
+      "1.0.0"
+    );
+
+    const expired = markPackageExpired(pkg, "手动过期");
+    const check = checkPackageExpired(
+      expired,
+      annotations,
+      true,
+      defaultRiskFilter,
+      []
+    );
+
+    expect(check.expired).toBe(true);
+    expect(check.reason).toBe("手动过期");
+  });
+
+  it("数据未变更时检测为未过期", () => {
+    const job = makeTestJob();
+    const annotations = makeTestAnnotations(3);
+    const templates = makeTestTemplates();
+
+    const pkg = createSessionPackage(
+      job,
+      annotations,
+      1000,
+      defaultCamera,
+      true,
+      defaultRiskFilter,
+      [],
+      templates,
+      "测试包",
+      "1.0.0"
+    );
+
+    const check = checkPackageExpired(
+      pkg,
+      annotations,
+      true,
+      defaultRiskFilter,
+      []
+    );
+
+    expect(check.expired).toBe(false);
+  });
+});
+
+describe("sessionPackage - 导出控制", () => {
+  it("未过期且校验和正确的包可以导出", () => {
+    const job = makeTestJob();
+    const annotations = makeTestAnnotations(3);
+    const templates = makeTestTemplates();
+
+    const pkg = createSessionPackage(
+      job,
+      annotations,
+      1000,
+      defaultCamera,
+      true,
+      defaultRiskFilter,
+      [],
+      templates,
+      "测试包",
+      "1.0.0"
+    );
+
+    expect(canExportPackage(pkg)).toBe(true);
+  });
+
+  it("已过期的包不能导出", () => {
+    const job = makeTestJob();
+    const annotations = makeTestAnnotations(3);
+    const templates = makeTestTemplates();
+
+    const pkg = createSessionPackage(
+      job,
+      annotations,
+      1000,
+      defaultCamera,
+      true,
+      defaultRiskFilter,
+      [],
+      templates,
+      "测试包",
+      "1.0.0"
+    );
+
+    const expired = markPackageExpired(pkg, "测试过期");
+    expect(canExportPackage(expired)).toBe(false);
+  });
+
+  it("校验和错误的包不能导出", () => {
+    const job = makeTestJob();
+    const annotations = makeTestAnnotations(3);
+    const templates = makeTestTemplates();
+
+    const pkg = createSessionPackage(
+      job,
+      annotations,
+      1000,
+      defaultCamera,
+      true,
+      defaultRiskFilter,
+      [],
+      templates,
+      "测试包",
+      "1.0.0"
+    );
+
+    const tampered = { ...pkg, version: "9.9.9" };
+    expect(canExportPackage(tampered)).toBe(false);
+  });
+});
+
+describe("sessionPackage - 序列化与反序列化", () => {
+  it("序列化后反序列化保持数据一致", () => {
+    const job = makeTestJob();
+    const annotations = makeTestAnnotations(3);
+    const templates = makeTestTemplates();
+
+    const original = createSessionPackage(
+      job,
+      annotations,
+      1000,
+      defaultCamera,
+      true,
+      defaultRiskFilter,
+      [],
+      templates,
+      "测试包",
+      "1.0.0"
+    );
+
+    const serialized = serializePackage(original);
+    const result = deserializePackage(serialized);
+
+    expect(result.valid).toBe(true);
+    expect(result.pkg).toBeDefined();
+    expect(result.pkg!.id).toBe(original.id);
+    expect(result.pkg!.version).toBe(original.version);
+    expect(result.pkg!.checksum).toBe(original.checksum);
+  });
+
+  it("校验结构验证必填字段", () => {
+    const invalid = { id: "test", name: "test" };
+    const result = validatePackageStructure(invalid);
+    expect(result.valid).toBe(false);
+    expect(result.errors.length).toBeGreaterThan(0);
+  });
+
+  it("篡改后的包反序列化失败", () => {
+    const job = makeTestJob();
+    const annotations = makeTestAnnotations(3);
+    const templates = makeTestTemplates();
+
+    const original = createSessionPackage(
+      job,
+      annotations,
+      1000,
+      defaultCamera,
+      true,
+      defaultRiskFilter,
+      [],
+      templates,
+      "测试包",
+      "1.0.0"
+    );
+
+    const serialized = serializePackage(original);
+    const parsed = JSON.parse(serialized);
+    parsed.version = "2.0.0";
+    const tamperedSerialized = JSON.stringify(parsed);
+
+    const result = deserializePackage(tamperedSerialized);
+    expect(result.valid).toBe(false);
+    expect(result.errors).toContain("包校验和不匹配，数据可能已被篡改");
+  });
+
+  it("无效JSON反序列化失败", () => {
+    const result = deserializePackage("not valid json");
+    expect(result.valid).toBe(false);
+    expect(result.errors[0]).toContain("JSON 解析失败");
+  });
+});
+
+describe("sessionPackage - 导入冲突处理", () => {
+  it("检测到同作业同版本冲突", () => {
+    const job = makeTestJob();
+    const annotations = makeTestAnnotations(3);
+    const templates = makeTestTemplates();
+
+    const existing = createSessionPackage(
+      job,
+      annotations,
+      1000,
+      defaultCamera,
+      true,
+      defaultRiskFilter,
+      [],
+      templates,
+      "现有包",
+      "1.0.0"
+    );
+
+    const incoming = createSessionPackage(
+      job,
+      annotations,
+      2000,
+      defaultCamera,
+      true,
+      defaultRiskFilter,
+      [],
+      templates,
+      "新包",
+      "1.0.0"
+    );
+
+    const conflict = checkImportConflict(incoming, [existing]);
+    expect(conflict).not.toBeNull();
+    expect(conflict!.existingPackage.id).toBe(existing.id);
+    expect(conflict!.incomingPackage.id).toBe(incoming.id);
+  });
+
+  it("不同版本不产生冲突", () => {
+    const job = makeTestJob();
+    const annotations = makeTestAnnotations(3);
+    const templates = makeTestTemplates();
+
+    const existing = createSessionPackage(
+      job,
+      annotations,
+      1000,
+      defaultCamera,
+      true,
+      defaultRiskFilter,
+      [],
+      templates,
+      "现有包",
+      "1.0.0"
+    );
+
+    const incoming = createSessionPackage(
+      job,
+      annotations,
+      2000,
+      defaultCamera,
+      true,
+      defaultRiskFilter,
+      [],
+      templates,
+      "新包",
+      "2.0.0"
+    );
+
+    const conflict = checkImportConflict(incoming, [existing]);
+    expect(conflict).toBeNull();
+  });
+
+  it("覆盖解决冲突保留现有ID", () => {
+    const job = makeTestJob();
+    const annotations = makeTestAnnotations(3);
+    const templates = makeTestTemplates();
+
+    const existing = createSessionPackage(
+      job,
+      annotations,
+      1000,
+      defaultCamera,
+      true,
+      defaultRiskFilter,
+      [],
+      templates,
+      "现有包",
+      "1.0.0"
+    );
+
+    const incoming = createSessionPackage(
+      job,
+      annotations,
+      2000,
+      defaultCamera,
+      true,
+      defaultRiskFilter,
+      [],
+      templates,
+      "新包",
+      "1.0.0"
+    );
+
+    const resolved = resolveImportConflict(incoming, existing, "overwrite");
+    expect(resolved).not.toBeNull();
+    expect(resolved!.id).toBe(existing.id);
+    expect(resolved!.name).toBe("新包");
+  });
+
+  it("重命名解决冲突使用新版本号", () => {
+    const job = makeTestJob();
+    const annotations = makeTestAnnotations(3);
+    const templates = makeTestTemplates();
+
+    const existing = createSessionPackage(
+      job,
+      annotations,
+      1000,
+      defaultCamera,
+      true,
+      defaultRiskFilter,
+      [],
+      templates,
+      "现有包",
+      "1.0.0"
+    );
+
+    const incoming = createSessionPackage(
+      job,
+      annotations,
+      2000,
+      defaultCamera,
+      true,
+      defaultRiskFilter,
+      [],
+      templates,
+      "新包",
+      "1.0.0"
+    );
+
+    const resolved = resolveImportConflict(incoming, existing, "rename", "1.0.1");
+    expect(resolved).not.toBeNull();
+    expect(resolved!.version).toBe("1.0.1");
+    expect(resolved!.id).not.toBe(existing.id);
+  });
+
+  it("取消解决冲突返回null", () => {
+    const job = makeTestJob();
+    const annotations = makeTestAnnotations(3);
+    const templates = makeTestTemplates();
+
+    const existing = createSessionPackage(
+      job,
+      annotations,
+      1000,
+      defaultCamera,
+      true,
+      defaultRiskFilter,
+      [],
+      templates,
+      "现有包",
+      "1.0.0"
+    );
+
+    const incoming = createSessionPackage(
+      job,
+      annotations,
+      2000,
+      defaultCamera,
+      true,
+      defaultRiskFilter,
+      [],
+      templates,
+      "新包",
+      "1.0.0"
+    );
+
+    const resolved = resolveImportConflict(incoming, existing, "cancel");
+    expect(resolved).toBeNull();
+  });
+
+  it("重命名不提供新版本号抛出错误", () => {
+    const job = makeTestJob();
+    const annotations = makeTestAnnotations(3);
+    const templates = makeTestTemplates();
+
+    const existing = createSessionPackage(
+      job,
+      annotations,
+      1000,
+      defaultCamera,
+      true,
+      defaultRiskFilter,
+      [],
+      templates,
+      "现有包",
+      "1.0.0"
+    );
+
+    const incoming = createSessionPackage(
+      job,
+      annotations,
+      2000,
+      defaultCamera,
+      true,
+      defaultRiskFilter,
+      [],
+      templates,
+      "新包",
+      "1.0.0"
+    );
+
+    expect(() => {
+      resolveImportConflict(incoming, existing, "rename");
+    }).toThrow("重命名需要提供新版本号");
+  });
+});
+
+describe("sessionPackage - 状态恢复", () => {
+  it("从包中恢复完整状态", () => {
+    const job = makeTestJob();
+    const templates = makeTestTemplates();
+    const annotations: Annotation[] = [
+      {
+        id: "ann-0",
+        timestamp: 0,
+        position: [0, 0, 0] as [number, number, number],
+        riskLevel: "warning",
+        text: "批注 0",
+        ignored: false,
+        createdAt: new Date().toISOString(),
+        templateSourceId: "tpl-1",
+      },
+      {
+        id: "ann-1",
+        timestamp: 1000,
+        position: [0, 0, 0] as [number, number, number],
+        riskLevel: "danger",
+        text: "批注 1",
+        ignored: false,
+        createdAt: new Date().toISOString(),
+      },
+      {
+        id: "ann-2",
+        timestamp: 2000,
+        position: [0, 0, 0] as [number, number, number],
+        riskLevel: "safe",
+        text: "批注 2",
+        ignored: false,
+        createdAt: new Date().toISOString(),
+      },
+    ];
+    const ignoredIds = ["ann-1"];
+    const filter: RiskLevelFilter = { safe: true, warning: false, danger: true };
+
+    const pkg = createSessionPackage(
+      job,
+      annotations,
+      2500,
+      { position: [10, 20, 30] as [number, number, number], target: [1, 2, 3] as [number, number, number] },
+      false,
+      filter,
+      ignoredIds,
+      templates,
+      "测试包",
+      "1.0.0"
+    );
+
+    const restored = restoreFromPackage(pkg);
+
+    expect(restored.job.meta.name).toBe("测试作业");
+    expect(restored.annotations).toHaveLength(3);
+    expect(restored.currentTime).toBe(2500);
+    expect(restored.camera.position).toEqual([10, 20, 30]);
+    expect(restored.camera.target).toEqual([1, 2, 3]);
+    expect(restored.showIgnored).toBe(false);
+    expect(restored.riskLevelFilter.warning).toBe(false);
+    expect(restored.ignoredRiskIds).toEqual(["ann-1"]);
+    expect(restored.templates).toHaveLength(1);
+  });
+
+  it("恢复的数据是独立副本", () => {
+    const job = makeTestJob();
+    const annotations = makeTestAnnotations(2);
+    const templates = makeTestTemplates();
+
+    const pkg = createSessionPackage(
+      job,
+      annotations,
+      1000,
+      defaultCamera,
+      true,
+      defaultRiskFilter,
+      [],
+      templates,
+      "测试包",
+      "1.0.0"
+    );
+
+    const restored = restoreFromPackage(pkg);
+    restored.annotations[0].text = "修改恢复后的批注";
+
+    expect(pkg.snapshot.annotations[0].text).not.toBe("修改恢复后的批注");
+  });
+});
+
+describe("sessionPackage - 版本号递增", () => {
+  it("语义化版本正确递增补丁号", () => {
+    expect(incrementVersion("1.0.0")).toBe("1.0.1");
+    expect(incrementVersion("2.1.5")).toBe("2.1.6");
+  });
+
+  it("非语义化版本添加.1后缀", () => {
+    expect(incrementVersion("1.0")).toBe("1.0.1");
+    expect(incrementVersion("v1")).toBe("v1.1");
+  });
+});
+
+describe("sessionPackage - 日志系统", () => {
+  it("创建操作日志条目", () => {
+    const job = makeTestJob();
+    const annotations = makeTestAnnotations(2);
+    const templates = makeTestTemplates();
+
+    const pkg = createSessionPackage(
+      job,
+      annotations,
+      1000,
+      defaultCamera,
+      true,
+      defaultRiskFilter,
+      [],
+      templates,
+      "测试包",
+      "1.0.0"
+    );
+
+    const log = createLogEntry(pkg, "publish", true, "发布成功");
+
+    expect(log.id).toBeDefined();
+    expect(log.packageId).toBe(pkg.id);
+    expect(log.packageVersion).toBe("1.0.0");
+    expect(log.action).toBe("publish");
+    expect(log.success).toBe(true);
+    expect(log.message).toBe("发布成功");
+    expect(log.timestamp).toBeDefined();
+  });
+
+  it("创建导入失败日志", () => {
+    const log = createImportFailureLog("测试包", "1.0.0", "格式错误", { detail: "test" });
+
+    expect(log.id).toBeDefined();
+    expect(log.action).toBe("import_failure");
+    expect(log.success).toBe(false);
+    expect(log.message).toBe("格式错误");
+    expect(log.details).toEqual({ detail: "test" });
+  });
+
+  it("支持所有操作类型", () => {
+    const job = makeTestJob();
+    const annotations = makeTestAnnotations(2);
+    const templates = makeTestTemplates();
+
+    const pkg = createSessionPackage(
+      job,
+      annotations,
+      1000,
+      defaultCamera,
+      true,
+      defaultRiskFilter,
+      [],
+      templates,
+      "测试包",
+      "1.0.0"
+    );
+
+    const actions: SessionPackageActionType[] = ["publish", "update", "revoke", "import", "import_failure", "expire"];
+
+    for (const action of actions) {
+      const log = createLogEntry(pkg, action, true, `${action} 操作`);
+      expect(log.action).toBe(action);
+    }
+  });
+});
+
+describe("sessionPackage - Store集成测试", () => {
+  beforeEach(() => {
+    const state = useStore.getState();
+    state.setJob(null);
+    state.annotations.forEach((a) => state.removeAnnotation(a.id));
+    state.setShowIgnored(true);
+    state.setRiskLevelFilter({ safe: true, warning: true, danger: true });
+    state.ignoredRiskIds.forEach((id) => state.toggleIgnoreRisk(id));
+    useStore.setState({
+      currentSnapshotId: null,
+      currentPackageId: null,
+      lastPublishId: null,
+      sessionPackages: {},
+      sessionPackageLogs: [],
+    });
+    localStorage.clear();
+  });
+
+  it("发布会话包后存储在store中", () => {
+    const store = useStore.getState();
+
+    const job = makeTestJob();
+    store.setJob(job);
+
+    const annotations = makeTestAnnotations(3);
+    store.addAnnotation(annotations[0]);
+    store.addAnnotation(annotations[1]);
+    store.addAnnotation(annotations[2]);
+
+    const pkg = store.publishSessionPackage("测试包", "1.0.0");
+
+    expect(pkg).toBeDefined();
+    expect(pkg.version).toBe("1.0.0");
+    expect(store.getCurrentJobPackages()).toHaveLength(1);
+    expect(store.getCurrentPackage()?.id).toBe(pkg.id);
+  });
+
+  it("批注变更后包自动标记为过期", () => {
+    const store = useStore.getState();
+
+    const job = makeTestJob();
+    store.setJob(job);
+
+    const annotations = makeTestAnnotations(2);
+    store.addAnnotation(annotations[0]);
+    store.addAnnotation(annotations[1]);
+
+    const pkg = store.publishSessionPackage("测试包", "1.0.0");
+    expect(store.isPackageExpired(pkg.id)).toBe(false);
+
+    store.updateAnnotation(annotations[0].id, { text: "修改后的批注" });
+
+    expect(store.isPackageExpired(pkg.id)).toBe(true);
+  });
+
+  it("筛选条件变更后包自动标记为过期", () => {
+    const store = useStore.getState();
+
+    const job = makeTestJob();
+    store.setJob(job);
+
+    const annotations = makeTestAnnotations(2);
+    store.addAnnotation(annotations[0]);
+    store.addAnnotation(annotations[1]);
+
+    const pkg = store.publishSessionPackage("测试包", "1.0.0");
+    expect(store.isPackageExpired(pkg.id)).toBe(false);
+
+    store.setRiskLevelFilter({ safe: false });
+
+    expect(store.isPackageExpired(pkg.id)).toBe(true);
+  });
+
+  it("过期的包无法导出", () => {
+    const store = useStore.getState();
+
+    const job = makeTestJob();
+    store.setJob(job);
+
+    const annotations = makeTestAnnotations(2);
+    store.addAnnotation(annotations[0]);
+    store.addAnnotation(annotations[1]);
+
+    const pkg = store.publishSessionPackage("测试包", "1.0.0");
+    expect(store.canExportSessionPackage(pkg.id)).toBe(true);
+
+    store.updateAnnotation(annotations[0].id, { text: "修改后的批注" });
+
+    expect(store.canExportSessionPackage(pkg.id)).toBe(false);
+    expect(() => store.exportPackageToFile(pkg.id)).toThrow("会话包已过期，无法导出");
+  });
+
+  it("撤销最近发布将包标记为过期", () => {
+    const store = useStore.getState();
+
+    const job = makeTestJob();
+    store.setJob(job);
+
+    const annotations = makeTestAnnotations(2);
+    store.addAnnotation(annotations[0]);
+    store.addAnnotation(annotations[1]);
+
+    const pkg = store.publishSessionPackage("测试包", "1.0.0");
+    expect(store.isPackageExpired(pkg.id)).toBe(false);
+
+    const result = store.revokeLastPublish();
+    expect(result.success).toBe(true);
+    expect(store.isPackageExpired(pkg.id)).toBe(true);
+    expect(store.getPackageById(pkg.id)?.expiredReason).toBe("已撤销发布");
+  });
+
+  it("导入冲突检测正常工作", () => {
+    const store = useStore.getState();
+
+    const job = makeTestJob();
+    store.setJob(job);
+
+    const annotations = makeTestAnnotations(2);
+    store.addAnnotation(annotations[0]);
+    store.addAnnotation(annotations[1]);
+
+    const pkg = store.publishSessionPackage("测试包", "1.0.0");
+    const serialized = store.exportPackageToFile(pkg.id);
+
+    store.deleteSnapshot(pkg.snapshot.id);
+    const newStore = useStore.getState();
+    newStore.setJob(job);
+
+    const result = newStore.importPackageFromFile(serialized);
+    expect(result.success).toBe(false);
+    expect(result.conflict).toBeDefined();
+  });
+
+  it("导入冲突覆盖解决", () => {
+    const store = useStore.getState();
+
+    const job = makeTestJob();
+    store.setJob(job);
+
+    const annotations = makeTestAnnotations(2);
+    store.addAnnotation(annotations[0]);
+    store.addAnnotation(annotations[1]);
+
+    const pkg = store.publishSessionPackage("原始包", "1.0.0");
+    const serialized = store.exportPackageToFile(pkg.id);
+
+    const result = store.importPackageFromFile(serialized, "overwrite");
+    expect(result.success).toBe(true);
+    expect(result.package?.version).toBe("1.0.0");
+  });
+
+  it("导入冲突重命名解决", () => {
+    const store = useStore.getState();
+
+    const job = makeTestJob();
+    store.setJob(job);
+
+    const annotations = makeTestAnnotations(2);
+    store.addAnnotation(annotations[0]);
+    store.addAnnotation(annotations[1]);
+
+    const pkg = store.publishSessionPackage("原始包", "1.0.0");
+    const serialized = store.exportPackageToFile(pkg.id);
+
+    const result = store.importPackageFromFile(serialized, "rename", "2.0.0");
+    expect(result.success).toBe(true);
+    expect(result.package?.version).toBe("2.0.0");
+  });
+
+  it("导入回放恢复所有状态", () => {
+    const store = useStore.getState();
+
+    const job = makeTestJob();
+    store.setJob(job);
+
+    const annotations = makeTestAnnotations(3);
+    store.addAnnotation(annotations[0]);
+    store.addAnnotation(annotations[1]);
+    store.addAnnotation(annotations[2]);
+    store.setRiskLevelFilter({ safe: false, warning: true, danger: true });
+    store.setShowIgnored(false);
+    store.toggleIgnoreRisk(annotations[0].id);
+    store.setCurrentTime(1500);
+    store.setCamera({ position: [10, 20, 30] as [number, number, number], target: [1, 2, 3] as [number, number, number] });
+
+    const pkg = store.publishSessionPackage("回放测试", "1.0.0");
+    const packageId = pkg.id;
+
+    const pkgBefore = store.getPackageById(packageId);
+    expect(pkgBefore).not.toBeNull();
+    expect(pkgBefore!.snapshot.annotations).toHaveLength(3);
+
+    const pkgAfter = store.getPackageById(packageId);
+    expect(pkgAfter).not.toBeNull();
+
+    const restored = restoreFromPackage(pkgAfter!);
+    expect(restored.job).not.toBeNull();
+    expect(restored.annotations).toHaveLength(3);
+    expect(restored.currentTime).toBe(1500);
+    expect(restored.riskLevelFilter.safe).toBe(false);
+    expect(restored.showIgnored).toBe(false);
+    expect(restored.ignoredRiskIds).toContain(annotations[0].id);
+    expect(restored.camera.position).toEqual([10, 20, 30]);
+
+    const result = store.restoreFromPackage(packageId);
+    expect(result.success).toBe(true);
+
+    const newState = useStore.getState();
+    expect(newState.job).not.toBeNull();
+    expect(newState.annotations).toHaveLength(3);
+    expect(newState.currentTime).toBe(1500);
+    expect(newState.riskLevelFilter.safe).toBe(false);
+    expect(newState.showIgnored).toBe(false);
+    expect(newState.ignoredRiskIds).toContain(annotations[0].id);
+    expect(newState.camera.position).toEqual([10, 20, 30]);
+  });
+
+  it("操作日志正确记录", () => {
+    const store = useStore.getState();
+
+    const job = makeTestJob();
+    store.setJob(job);
+
+    const annotations = makeTestAnnotations(2);
+    store.addAnnotation(annotations[0]);
+    store.addAnnotation(annotations[1]);
+
+    const initialLogCount = store.getPackageLogs().length;
+
+    const pkg = store.publishSessionPackage("日志测试", "1.0.0");
+    expect(store.getPackageLogs()).toHaveLength(initialLogCount + 1);
+
+    const publishLog = store.getPackageLogsByPackageId(pkg.id)[0];
+    expect(publishLog.action).toBe("publish");
+    expect(publishLog.success).toBe(true);
+
+    store.updateAnnotation(annotations[0].id, { text: "修改批注" });
+    expect(store.getPackageLogsByPackageId(pkg.id)).toHaveLength(2);
+
+    const expireLog = store.getPackageLogsByPackageId(pkg.id).find(l => l.action === "expire");
+    expect(expireLog).toBeDefined();
+    expect(expireLog?.message).toBe("批注数据已变更");
+  });
+
+  it("导入失败日志记录", () => {
+    const store = useStore.getState();
+
+    const initialLogCount = store.getPackageLogs().length;
+
+    const result = store.importPackageFromFile("invalid json content");
+    expect(result.success).toBe(false);
+    expect(store.getPackageLogs()).toHaveLength(initialLogCount + 1);
+
+    const failureLog = store.getPackageLogs().find(l => l.action === "import_failure");
+    expect(failureLog).toBeDefined();
+    expect(failureLog?.success).toBe(false);
+  });
+
+  it("同版本号发布会被拒绝", () => {
+    const store = useStore.getState();
+
+    const job = makeTestJob();
+    store.setJob(job);
+
+    const annotations = makeTestAnnotations(2);
+    store.addAnnotation(annotations[0]);
+    store.addAnnotation(annotations[1]);
+
+    store.publishSessionPackage("测试包", "1.0.0");
+
+    expect(() => {
+      store.publishSessionPackage("另一个包", "1.0.0");
+    }).toThrow("版本号 1.0.0 已存在");
+  });
+
+  it("更新包可选择升级版本", () => {
+    const store = useStore.getState();
+
+    const job = makeTestJob();
+    store.setJob(job);
+
+    const annotations = makeTestAnnotations(2);
+    store.addAnnotation(annotations[0]);
+    store.addAnnotation(annotations[1]);
+
+    const pkg = store.publishSessionPackage("测试包", "1.0.0");
+
+    store.addAnnotation({
+      id: "ann-new",
+      timestamp: 3000,
+      position: [0, 0, 0] as [number, number, number],
+      riskLevel: "warning",
+      text: "新增批注",
+      ignored: false,
+      createdAt: new Date().toISOString(),
+    });
+
+    const result = store.updateSessionPackage(pkg.id, "1.0.1");
+    expect(result.success).toBe(true);
+    expect(result.pkg?.version).toBe("1.0.1");
+    expect(store.isPackageExpired(pkg.id)).toBe(false);
+  });
+
+  it("数据持久化跨重启验证", () => {
+    const store = useStore.getState();
+
+    const job = makeTestJob();
+    store.setJob(job);
+
+    const annotations = makeTestAnnotations(3);
+    store.addAnnotation(annotations[0]);
+    store.addAnnotation(annotations[1]);
+    store.addAnnotation(annotations[2]);
+
+    const pkg = store.publishSessionPackage("持久化测试", "1.0.0");
+    expect(pkg).toBeDefined();
+    expect(store.getCurrentJobPackages()).toHaveLength(1);
+    expect(store.getPackageLogs()).toHaveLength(1);
+
+    const jobKey = `${job.meta.name}-${job.meta.date}-${job.meta.craneId}`;
+    const stateToPersist = {
+      state: {
+        sessionPackages: {
+          [jobKey]: [pkg],
+        },
+        sessionPackageLogs: store.getPackageLogs(),
+        currentPackageId: pkg.id,
+        lastPublishId: pkg.id,
+      },
+    };
+
+    localStorage.setItem("crane-replay-storage", JSON.stringify(stateToPersist));
+
+    const stored = localStorage.getItem("crane-replay-storage");
+    expect(stored).not.toBeNull();
+
+    const parsed = JSON.parse(stored!);
+    expect(parsed.state.sessionPackages).toBeDefined();
+    
+    const storedPkgs = parsed.state.sessionPackages[jobKey];
+    expect(storedPkgs).toBeDefined();
+    expect(storedPkgs).toHaveLength(1);
+    expect(storedPkgs[0].id).toBe(pkg.id);
+    expect(storedPkgs[0].version).toBe("1.0.0");
+    expect(storedPkgs[0].isExpired).toBe(false);
+
+    expect(parsed.state.sessionPackageLogs).toHaveLength(1);
+    expect(parsed.state.sessionPackageLogs[0].action).toBe("publish");
+    expect(parsed.state.currentPackageId).toBe(pkg.id);
+    expect(parsed.state.lastPublishId).toBe(pkg.id);
+
+    const deserialized = deserializePackage(JSON.stringify(storedPkgs[0]));
+    expect(deserialized.valid).toBe(true);
+    expect(deserialized.pkg).toBeDefined();
+    expect(deserialized.pkg!.id).toBe(pkg.id);
+    expect(verifyPackageChecksum(deserialized.pkg!)).toBe(true);
+  });
+
+  it("checkPackagesExpired正确检测所有过期包", () => {
+    const store = useStore.getState();
+
+    const job = makeTestJob();
+    store.setJob(job);
+
+    const annotations = makeTestAnnotations(3);
+    store.addAnnotation(annotations[0]);
+    store.addAnnotation(annotations[1]);
+    store.addAnnotation(annotations[2]);
+
+    const pkg1 = store.publishSessionPackage("包1", "1.0.0");
+    const pkg2 = store.publishSessionPackage("包2", "1.0.1");
+
+    expect(store.isPackageExpired(pkg1.id)).toBe(false);
+    expect(store.isPackageExpired(pkg2.id)).toBe(false);
+
+    store.updateAnnotation(annotations[0].id, { text: "修改批注" });
+
+    expect(store.isPackageExpired(pkg1.id)).toBe(true);
+    expect(store.isPackageExpired(pkg2.id)).toBe(true);
+
+    const logs = store.getPackageLogs();
+    const expireLogs = logs.filter(l => l.action === "expire");
+    expect(expireLogs).toHaveLength(2);
+  });
+
+  it("导入篡改的包会被拒绝", () => {
+    const store = useStore.getState();
+
+    const job = makeTestJob();
+    store.setJob(job);
+
+    const annotations = makeTestAnnotations(2);
+    store.addAnnotation(annotations[0]);
+    store.addAnnotation(annotations[1]);
+
+    const pkg = store.publishSessionPackage("测试包", "1.0.0");
+    const serialized = store.exportPackageToFile(pkg.id);
+
+    const parsed = JSON.parse(serialized);
+    parsed.version = "9.9.9";
+    const tampered = JSON.stringify(parsed);
+
+    const result = store.importPackageFromFile(tampered);
+    expect(result.success).toBe(false);
+    expect(result.errors).toContain("包校验和不匹配，数据可能已被篡改");
+  });
+
+  it("过期包列表显示版本号、创建时间和过期状态", () => {
+    const store = useStore.getState();
+
+    const job = makeTestJob();
+    store.setJob(job);
+
+    const annotations = makeTestAnnotations(2);
+    store.addAnnotation(annotations[0]);
+    store.addAnnotation(annotations[1]);
+
+    store.publishSessionPackage("测试包", "1.0.0");
+    store.addAnnotation({
+      id: "ann-expire",
+      timestamp: 5000,
+      position: [0, 0, 0] as [number, number, number],
+      riskLevel: "safe",
+      text: "触发过期",
+      ignored: false,
+      createdAt: new Date().toISOString(),
+    });
+
+    const packages = store.getCurrentJobPackages();
+    expect(packages).toHaveLength(1);
+
+    const pkgInfo = packages[0];
+    expect(pkgInfo.version).toBeDefined();
+    expect(pkgInfo.createdAt).toBeDefined();
+    expect(pkgInfo.isExpired).toBe(true);
+    expect(pkgInfo.expiredReason).toBe("批注数据已变更");
+    expect(pkgInfo.expiredAt).toBeDefined();
+  });
+});
+

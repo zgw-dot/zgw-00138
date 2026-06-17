@@ -10,9 +10,28 @@ import type {
   CameraState,
   ExportSnapshot,
   SnapshotHistoryEntry,
+  ReviewSessionPackage,
+  SessionPackageLogEntry,
+  ImportResolution,
+  ImportResult,
 } from "@/types";
 import { precheckJob, sanitizeJob } from "@/utils/validation";
 import { createSnapshot, updateSnapshot, areFiltersEqual } from "@/utils/export";
+import {
+  createSessionPackage,
+  updateSessionPackage,
+  markPackageExpired,
+  checkPackageExpired,
+  canExportPackage,
+  createLogEntry,
+  createImportFailureLog,
+  serializePackage,
+  deserializePackage,
+  checkImportConflict,
+  resolveImportConflict,
+  restoreFromPackage,
+  incrementVersion,
+} from "@/utils/sessionPackage";
 
 export interface ImportFailureRecord {
   reason: string;
@@ -40,6 +59,10 @@ interface AppState {
   currentJobId: string | null;
   snapshotHistory: SnapshotHistoryEntry[];
   templates: AnnotationTemplate[];
+  sessionPackages: Record<string, ReviewSessionPackage[]>;
+  sessionPackageLogs: SessionPackageLogEntry[];
+  currentPackageId: string | null;
+  lastPublishId: string | null;
 
   setJob: (job: LiftingJob | null) => void;
   importJob: (raw: unknown) => { success: boolean; errors: ValidationError[] };
@@ -77,6 +100,24 @@ interface AppState {
   canUndo: () => boolean;
   checkDataChanged: () => boolean;
   isSnapshotStale: () => boolean;
+
+  publishSessionPackage: (name: string, version: string) => ReviewSessionPackage;
+  updateSessionPackage: (packageId: string, newVersion?: string) => { success: boolean; pkg?: ReviewSessionPackage };
+  saveAsNewVersion: (packageId: string, customVersion?: string) => { success: boolean; pkg?: ReviewSessionPackage };
+  revokeLastPublish: () => { success: boolean; pkg?: ReviewSessionPackage };
+  getCurrentJobPackages: () => ReviewSessionPackage[];
+  getPackageById: (packageId: string) => ReviewSessionPackage | null;
+  getCurrentPackage: () => ReviewSessionPackage | null;
+  setCurrentPackage: (packageId: string | null) => void;
+  checkPackagesExpired: () => void;
+  canExportSessionPackage: (packageId: string) => boolean;
+  exportPackageToFile: (packageId: string) => string;
+  importPackageFromFile: (content: string, resolution?: ImportResolution, newVersion?: string) => ImportResult;
+  restoreFromPackage: (packageId: string) => { success: boolean; errors?: string[] };
+  getPackageLogs: () => SessionPackageLogEntry[];
+  getPackageLogsByPackageId: (packageId: string) => SessionPackageLogEntry[];
+  hasPackageVersionConflict: (jobId: string, version: string) => boolean;
+  isPackageExpired: (packageId: string) => boolean;
 }
 
 const defaultCameraPresets: CameraPreset[] = [
@@ -110,6 +151,59 @@ function getJobId(job: LiftingJob): string {
   return `${job.meta.name}-${job.meta.date}-${job.meta.craneId}`;
 }
 
+function checkAndMarkExpired(
+  state: AppState,
+  annotations: Annotation[],
+  showIgnored: boolean,
+  riskLevelFilter: RiskLevelFilter,
+  ignoredRiskIds: string[]
+): {
+  sessionPackages: Record<string, ReviewSessionPackage[]>;
+  newLogs: SessionPackageLogEntry[];
+} {
+  const jobId = state.currentJobId;
+  if (!jobId) {
+    return { sessionPackages: state.sessionPackages, newLogs: [] };
+  }
+
+  const jobPackages = state.sessionPackages[jobId] || [];
+  const updatedPackages: ReviewSessionPackage[] = [];
+  const newLogs: SessionPackageLogEntry[] = [];
+
+  for (const pkg of jobPackages) {
+    if (pkg.isExpired) {
+      updatedPackages.push(pkg);
+      continue;
+    }
+
+    const check = checkPackageExpired(
+      pkg,
+      annotations,
+      showIgnored,
+      riskLevelFilter,
+      ignoredRiskIds
+    );
+
+    if (check.expired && check.reason) {
+      const expiredPkg = markPackageExpired(pkg, check.reason);
+      updatedPackages.push(expiredPkg);
+      newLogs.push(
+        createLogEntry(expiredPkg, "expire", true, check.reason)
+      );
+    } else {
+      updatedPackages.push(pkg);
+    }
+  }
+
+  return {
+    sessionPackages: {
+      ...state.sessionPackages,
+      [jobId]: updatedPackages,
+    },
+    newLogs,
+  };
+}
+
 export const useStore = create<AppState>()(
   persist(
     (set, get) => ({
@@ -132,6 +226,10 @@ export const useStore = create<AppState>()(
       currentJobId: null,
       snapshotHistory: [],
       templates: [],
+      sessionPackages: {},
+      sessionPackageLogs: [],
+      currentPackageId: null,
+      lastPublishId: null,
 
       setJob: (job) => {
         const jobId = job ? getJobId(job) : null;
@@ -189,28 +287,68 @@ export const useStore = create<AppState>()(
         })),
       setCameraPresets: (cameraPresets) => set({ cameraPresets }),
       addAnnotation: (a) =>
-        set((s) => ({ annotations: [...s.annotations, a] })),
+        set((s) => {
+          const newAnnotations = [...s.annotations, a];
+          const updated = checkAndMarkExpired(s, newAnnotations, s.showIgnored, s.riskLevelFilter, s.ignoredRiskIds);
+          return {
+            annotations: newAnnotations,
+            sessionPackages: updated.sessionPackages,
+            sessionPackageLogs: [...s.sessionPackageLogs, ...updated.newLogs],
+          };
+        }),
       updateAnnotation: (id, updates) =>
-        set((s) => ({
-          annotations: s.annotations.map((a) =>
+        set((s) => {
+          const newAnnotations = s.annotations.map((a) =>
             a.id === id ? { ...a, ...updates } : a
-          ),
-        })),
+          );
+          const updated = checkAndMarkExpired(s, newAnnotations, s.showIgnored, s.riskLevelFilter, s.ignoredRiskIds);
+          return {
+            annotations: newAnnotations,
+            sessionPackages: updated.sessionPackages,
+            sessionPackageLogs: [...s.sessionPackageLogs, ...updated.newLogs],
+          };
+        }),
       removeAnnotation: (id) =>
-        set((s) => ({
-          annotations: s.annotations.filter((a) => a.id !== id),
-        })),
+        set((s) => {
+          const newAnnotations = s.annotations.filter((a) => a.id !== id);
+          const updated = checkAndMarkExpired(s, newAnnotations, s.showIgnored, s.riskLevelFilter, s.ignoredRiskIds);
+          return {
+            annotations: newAnnotations,
+            sessionPackages: updated.sessionPackages,
+            sessionPackageLogs: [...s.sessionPackageLogs, ...updated.newLogs],
+          };
+        }),
       toggleIgnoreRisk: (id) =>
-        set((s) => ({
-          ignoredRiskIds: s.ignoredRiskIds.includes(id)
+        set((s) => {
+          const newIgnored = s.ignoredRiskIds.includes(id)
             ? s.ignoredRiskIds.filter((i) => i !== id)
-            : [...s.ignoredRiskIds, id],
-        })),
-      setShowIgnored: (showIgnored) => set({ showIgnored }),
+            : [...s.ignoredRiskIds, id];
+          const updated = checkAndMarkExpired(s, s.annotations, s.showIgnored, s.riskLevelFilter, newIgnored);
+          return {
+            ignoredRiskIds: newIgnored,
+            sessionPackages: updated.sessionPackages,
+            sessionPackageLogs: [...s.sessionPackageLogs, ...updated.newLogs],
+          };
+        }),
+      setShowIgnored: (showIgnored) =>
+        set((s) => {
+          const updated = checkAndMarkExpired(s, s.annotations, showIgnored, s.riskLevelFilter, s.ignoredRiskIds);
+          return {
+            showIgnored,
+            sessionPackages: updated.sessionPackages,
+            sessionPackageLogs: [...s.sessionPackageLogs, ...updated.newLogs],
+          };
+        }),
       setRiskLevelFilter: (filter) =>
-        set((s) => ({
-          riskLevelFilter: { ...s.riskLevelFilter, ...filter },
-        })),
+        set((s) => {
+          const newFilter = { ...s.riskLevelFilter, ...filter };
+          const updated = checkAndMarkExpired(s, s.annotations, s.showIgnored, newFilter, s.ignoredRiskIds);
+          return {
+            riskLevelFilter: newFilter,
+            sessionPackages: updated.sessionPackages,
+            sessionPackageLogs: [...s.sessionPackageLogs, ...updated.newLogs],
+          };
+        }),
       setErrors: (errors) => set({ errors }),
       addErrors: (e) =>
         set((s) => ({ errors: [...s.errors, ...e] })),
@@ -438,6 +576,376 @@ export const useStore = create<AppState>()(
         const state = get();
         return state.checkDataChanged() || state.checkFilterChanged();
       },
+
+      publishSessionPackage: (name: string, version: string) => {
+        const state = get();
+        if (!state.job) {
+          throw new Error("没有加载作业，无法发布会话包");
+        }
+
+        const jobId = getJobId(state.job);
+        if (state.hasPackageVersionConflict(jobId, version)) {
+          throw new Error(`版本号 ${version} 已存在，请使用其他版本号`);
+        }
+
+        const pkg = createSessionPackage(
+          state.job,
+          state.annotations,
+          state.currentTime,
+          state.camera,
+          state.showIgnored,
+          state.riskLevelFilter,
+          state.ignoredRiskIds,
+          state.templates,
+          name,
+          version
+        );
+
+        const logEntry = createLogEntry(pkg, "publish", true, "发布会话包成功");
+
+        set((s) => {
+          const jobPackages = s.sessionPackages[jobId] || [];
+          return {
+            sessionPackages: {
+              ...s.sessionPackages,
+              [jobId]: [...jobPackages, pkg],
+            },
+            currentPackageId: pkg.id,
+            lastPublishId: pkg.id,
+            sessionPackageLogs: [...s.sessionPackageLogs, logEntry],
+          };
+        });
+
+        return pkg;
+      },
+
+      updateSessionPackage: (packageId: string, newVersion?: string) => {
+        const state = get();
+        if (!state.job) {
+          return { success: false };
+        }
+
+        const pkg = state.getPackageById(packageId);
+        if (!pkg) {
+          return { success: false };
+        }
+
+        if (newVersion && state.hasPackageVersionConflict(pkg.jobId, newVersion)) {
+          return { success: false };
+        }
+
+        const updated = updateSessionPackage(
+          pkg,
+          state.job,
+          state.annotations,
+          state.currentTime,
+          state.camera,
+          state.showIgnored,
+          state.riskLevelFilter,
+          state.ignoredRiskIds,
+          state.templates,
+          newVersion
+        );
+
+        const logEntry = createLogEntry(updated, "update", true, "更新会话包成功");
+
+        set((s) => {
+          const jobPackages = s.sessionPackages[pkg.jobId] || [];
+          const newPackages = jobPackages.map((p) =>
+            p.id === pkg.id ? updated : p
+          );
+          return {
+            sessionPackages: {
+              ...s.sessionPackages,
+              [pkg.jobId]: newPackages,
+            },
+            sessionPackageLogs: [...s.sessionPackageLogs, logEntry],
+          };
+        });
+
+        return { success: true, pkg: updated };
+      },
+
+      saveAsNewVersion: (packageId: string, customVersion?: string) => {
+        const state = get();
+        if (!state.job) {
+          return { success: false };
+        }
+
+        const existingPkg = state.getPackageById(packageId);
+        if (!existingPkg) {
+          return { success: false };
+        }
+
+        const newVersion = customVersion || incrementVersion(existingPkg.version);
+        if (state.hasPackageVersionConflict(existingPkg.jobId, newVersion)) {
+          return { success: false };
+        }
+
+        const newPkg = createSessionPackage(
+          state.job,
+          state.annotations,
+          state.currentTime,
+          state.camera,
+          state.showIgnored,
+          state.riskLevelFilter,
+          state.ignoredRiskIds,
+          state.templates,
+          existingPkg.name,
+          newVersion
+        );
+
+        const logEntry = createLogEntry(newPkg, "publish", true, `另存新版本 ${newVersion} 成功`);
+
+        set((s) => {
+          const jobPackages = s.sessionPackages[existingPkg.jobId] || [];
+          return {
+            sessionPackages: {
+              ...s.sessionPackages,
+              [existingPkg.jobId]: [...jobPackages, newPkg],
+            },
+            currentPackageId: newPkg.id,
+            lastPublishId: newPkg.id,
+            sessionPackageLogs: [...s.sessionPackageLogs, logEntry],
+          };
+        });
+
+        return { success: true, pkg: newPkg };
+      },
+
+      revokeLastPublish: () => {
+        const state = get();
+        if (!state.lastPublishId) {
+          return { success: false };
+        }
+
+        const pkg = state.getPackageById(state.lastPublishId);
+        if (!pkg) {
+          return { success: false };
+        }
+
+        const expiredPkg = markPackageExpired(pkg, "已撤销发布");
+
+        const logEntry = createLogEntry(expiredPkg, "revoke", true, "撤销发布成功");
+
+        set((s) => {
+          const jobPackages = s.sessionPackages[pkg.jobId] || [];
+          const newPackages = jobPackages.map((p) =>
+            p.id === pkg.id ? expiredPkg : p
+          );
+          return {
+            sessionPackages: {
+              ...s.sessionPackages,
+              [pkg.jobId]: newPackages,
+            },
+            lastPublishId: null,
+            sessionPackageLogs: [...s.sessionPackageLogs, logEntry],
+          };
+        });
+
+        return { success: true, pkg: expiredPkg };
+      },
+
+      getCurrentJobPackages: () => {
+        const state = get();
+        if (!state.currentJobId) return [];
+        return state.sessionPackages[state.currentJobId] || [];
+      },
+
+      getPackageById: (packageId: string) => {
+        const state = get();
+        for (const jobPackages of Object.values(state.sessionPackages)) {
+          const pkg = jobPackages.find((p) => p.id === packageId);
+          if (pkg) return pkg;
+        }
+        return null;
+      },
+
+      getCurrentPackage: () => {
+        const state = get();
+        if (!state.currentPackageId) return null;
+        return state.getPackageById(state.currentPackageId);
+      },
+
+      setCurrentPackage: (packageId: string | null) => {
+        set({ currentPackageId: packageId });
+      },
+
+      checkPackagesExpired: () => {
+        const state = get();
+        const jobId = state.currentJobId;
+        if (!jobId) return;
+
+        const jobPackages = state.sessionPackages[jobId] || [];
+        const updatedPackages: ReviewSessionPackage[] = [];
+        const newLogs: SessionPackageLogEntry[] = [];
+
+        for (const pkg of jobPackages) {
+          if (pkg.isExpired) {
+            updatedPackages.push(pkg);
+            continue;
+          }
+
+          const check = checkPackageExpired(
+            pkg,
+            state.annotations,
+            state.showIgnored,
+            state.riskLevelFilter,
+            state.ignoredRiskIds
+          );
+
+          if (check.expired && check.reason) {
+            const expiredPkg = markPackageExpired(pkg, check.reason);
+            updatedPackages.push(expiredPkg);
+            newLogs.push(
+              createLogEntry(expiredPkg, "expire", true, check.reason)
+            );
+          } else {
+            updatedPackages.push(pkg);
+          }
+        }
+
+        if (newLogs.length > 0) {
+          set((s) => ({
+            sessionPackages: {
+              ...s.sessionPackages,
+              [jobId]: updatedPackages,
+            },
+            sessionPackageLogs: [...s.sessionPackageLogs, ...newLogs],
+          }));
+        }
+      },
+
+      canExportSessionPackage: (packageId: string) => {
+        const pkg = get().getPackageById(packageId);
+        if (!pkg) return false;
+        return canExportPackage(pkg);
+      },
+
+      exportPackageToFile: (packageId: string) => {
+        const pkg = get().getPackageById(packageId);
+        if (!pkg) {
+          throw new Error("会话包不存在");
+        }
+        if (!canExportPackage(pkg)) {
+          throw new Error("会话包已过期，无法导出");
+        }
+        return serializePackage(pkg);
+      },
+
+      importPackageFromFile: (content: string, resolution?: ImportResolution, newVersion?: string) => {
+        const state = get();
+        const result = deserializePackage(content);
+
+        if (!result.valid || !result.pkg) {
+          const logEntry = createImportFailureLog(
+            "unknown",
+            "unknown",
+            `导入失败: ${result.errors.join(", ")}`
+          );
+          set((s) => ({
+            sessionPackageLogs: [...s.sessionPackageLogs, logEntry],
+          }));
+          return { success: false, errors: result.errors };
+        }
+
+        const incoming = result.pkg;
+        const allPackages = Object.values(state.sessionPackages).flat();
+        const conflict = checkImportConflict(incoming, allPackages);
+
+        if (conflict) {
+          if (!resolution) {
+            return { success: false, conflict };
+          }
+
+          const resolved = resolveImportConflict(
+            incoming,
+            conflict.existingPackage,
+            resolution,
+            newVersion
+          );
+
+          if (!resolved) {
+            return { success: false };
+          }
+
+          incoming.id = resolved.id;
+          incoming.version = resolved.version;
+        }
+
+        const logEntry = createLogEntry(incoming, "import", true, "导入会话包成功");
+
+        set((s) => {
+          const jobPackages = s.sessionPackages[incoming.jobId] || [];
+          const existingIndex = jobPackages.findIndex((p) => p.id === incoming.id);
+          let newPackages;
+          if (existingIndex >= 0) {
+            newPackages = [...jobPackages];
+            newPackages[existingIndex] = incoming;
+          } else {
+            newPackages = [...jobPackages, incoming];
+          }
+          return {
+            sessionPackages: {
+              ...s.sessionPackages,
+              [incoming.jobId]: newPackages,
+            },
+            sessionPackageLogs: [...s.sessionPackageLogs, logEntry],
+          };
+        });
+
+        return { success: true, package: incoming };
+      },
+
+      restoreFromPackage: (packageId: string) => {
+        const state = get();
+        const pkg = state.getPackageById(packageId);
+        if (!pkg) {
+          return { success: false, errors: ["会话包不存在"] };
+        }
+
+        try {
+          const restored = restoreFromPackage(pkg);
+          const jobId = getJobId(restored.job);
+
+          set({
+            job: restored.job,
+            currentTime: restored.currentTime,
+            camera: restored.camera,
+            annotations: restored.annotations,
+            ignoredRiskIds: restored.ignoredRiskIds,
+            showIgnored: restored.showIgnored,
+            riskLevelFilter: restored.riskLevelFilter,
+            templates: restored.templates,
+            currentJobId: jobId,
+            currentPackageId: packageId,
+            isPlaying: false,
+          });
+
+          return { success: true };
+        } catch (e) {
+          return { success: false, errors: [(e as Error).message] };
+        }
+      },
+
+      getPackageLogs: () => {
+        return get().sessionPackageLogs;
+      },
+
+      getPackageLogsByPackageId: (packageId: string) => {
+        return get().sessionPackageLogs.filter((log) => log.packageId === packageId);
+      },
+
+      hasPackageVersionConflict: (jobId: string, version: string) => {
+        const state = get();
+        const jobPackages = state.sessionPackages[jobId] || [];
+        return jobPackages.some((p) => p.version === version);
+      },
+
+      isPackageExpired: (packageId: string) => {
+        const pkg = get().getPackageById(packageId);
+        return pkg?.isExpired ?? false;
+      },
     }),
     {
       name: "crane-replay-storage",
@@ -456,6 +964,10 @@ export const useStore = create<AppState>()(
         currentJobId: state.currentJobId,
         snapshotHistory: state.snapshotHistory,
         templates: state.templates,
+        sessionPackages: state.sessionPackages,
+        sessionPackageLogs: state.sessionPackageLogs,
+        currentPackageId: state.currentPackageId,
+        lastPublishId: state.lastPublishId,
       }),
     }
   )

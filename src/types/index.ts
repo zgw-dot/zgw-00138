@@ -127,3 +127,66 @@ export interface SnapshotHistoryEntry {
   previousVersion: ExportSnapshot;
   timestamp: string;
 }
+
+export interface ExportedFiles {
+  json: string;
+  csv: string;
+}
+
+export interface ReviewSessionPackage {
+  id: string;
+  version: string;
+  name: string;
+  jobId: string;
+  jobMeta: LiftingJobMeta;
+  createdAt: string;
+  updatedAt: string;
+  isExpired: boolean;
+  expiredReason?: string;
+  expiredAt?: string;
+  snapshot: ExportSnapshot;
+  exportedFiles: ExportedFiles;
+  signature: string;
+  templateSources: AnnotationTemplate[];
+  checksum: string;
+}
+
+export type SessionPackageActionType =
+  | "publish"
+  | "update"
+  | "revoke"
+  | "import"
+  | "import_failure"
+  | "expire";
+
+export interface SessionPackageLogEntry {
+  id: string;
+  packageId: string;
+  packageVersion: string;
+  packageName: string;
+  action: SessionPackageActionType;
+  timestamp: string;
+  success: boolean;
+  message: string;
+  details?: Record<string, unknown>;
+}
+
+export interface ImportConflictInfo {
+  existingPackage: ReviewSessionPackage;
+  incomingPackage: ReviewSessionPackage;
+}
+
+export type ImportResolution = "overwrite" | "rename" | "cancel";
+
+export interface ImportResult {
+  success: boolean;
+  package?: ReviewSessionPackage;
+  conflict?: ImportConflictInfo;
+  errors?: string[];
+}
+
+export interface DataSignature {
+  annotationsHash: string;
+  filterHash: string;
+  combinedHash: string;
+}
