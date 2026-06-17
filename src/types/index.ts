@@ -150,6 +150,7 @@ export interface ReviewSessionPackage {
   templateSources: AnnotationTemplate[];
   operationLogs: SessionPackageLogEntry[];
   checksum: string;
+  schemaVersion: string;
 }
 
 export type SessionPackageActionType =
@@ -164,6 +165,9 @@ export type SessionPackageActionType =
   | "import_conflict_rename"
   | "import_conflict_overwrite"
   | "restore"
+  | "audit_restore"
+  | "export"
+  | "version_incompatible"
   | "expire";
 
 export interface SessionPackageLogContext {
@@ -187,6 +191,11 @@ export interface SessionPackageLogContext {
   conflictResolution?: ImportResolution;
   conflictNewVersion?: string;
   conflictExistingVersion?: string;
+  restoredLogCount?: number;
+  restoredLogIds?: string[];
+  sourcePackageSchemaVersion?: string;
+  currentSchemaVersion?: string;
+  incompatibilityReason?: string;
 }
 
 export interface SessionPackageLogEntry {

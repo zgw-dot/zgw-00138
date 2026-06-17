@@ -385,6 +385,7 @@ npm run check
   "isExpired": false,
   "expiredReason": "批注数据已变更",  // 仅过期时存在
   "expiredAt": "ISO 时间戳",           // 仅过期时存在
+  "schemaVersion": "1.0.0",            // 包结构版本号
   "snapshot": {
     "id": "snap-...",
     "name": "...",
@@ -420,6 +421,101 @@ npm run check
 ## 会话轨迹归档
 
 会话轨迹归档将会话包从单一的场景快照文件，升级为**可复盘全过程的完整档案**。每一次发布、覆盖、另存、撤回、导入、冲突处理、恢复回放等关键动作，都会生成**结构化操作记录**，连同操作时的完整上下文（时间轴、相机、筛选、统计、模板、导出产物）一起封入包内。导入或回放时，包内的历史操作记录会自动同步回本地日志，确保操作链条完整可追溯。
+
+## 会话审计恢复
+
+会话审计恢复模块在「会话轨迹归档」基础上，进一步确保**操作历史在清空日志、换机器、改配置或重开应用后仍可完整恢复**。
+
+### 核心机制
+
+1. **导出封包**：导出会话包时，完整操作历史（`operationLogs`）随包一起序列化导出
+2. **导入恢复**：导入会话包时，先用 `mergeAndSortLogs` 按顺序将包内历史记录恢复到本地（按 ID 去重），再追加本次导入日志
+3. **回放恢复**：回放会话包时，先将包内历史记录恢复到本地，再写入 `audit_restore` 类型日志（含恢复了多少条历史记录、哪些 ID），而非仅写一条"已回放"
+4. **导出留痕**：每次导出操作生成 `export` 类型日志，包含导出时的完整上下文
+5. **版本不兼容提示**：包结构新增 `schemaVersion` 字段（当前版本 `"1.0.0"`），主版本号不匹配时给出明确错误提示并记录 `version_incompatible` 日志，不会静默吞掉
+6. **字段缺失提示**：`validatePackageStructure` 对每个缺失的必填字段给出中文名称提示（如"缺少必填字段: 包名称 (name)"），对 `operationLogs` 内每条记录也做字段校验
+
+### 去重规则
+
+| 场景 | 去重策略 |
+|------|---------|
+| 同一包多次导入 | 按日志 ID 去重，包内已有的历史记录不会重复写入本地；每次导入生成新的 `import` 日志 |
+| 同一包多次回放 | 按日志 ID 去重，包内历史记录不会重复；每次回放生成新的 `audit_restore` 日志 |
+| 跨机器恢复 | 包内 `operationLogs` 携带全量历史，导入后按 ID 去重合并到本地，时间排序 |
+
+### 新增动作类型
+
+| 动作类型 | 说明 | 触发时机 |
+|---------|------|---------|
+| `audit_restore` | 审计恢复 | 从会话包回放时，先恢复包内历史记录再写入此日志 |
+| `export` | 导出 | 导出会话包为文件时记录 |
+| `version_incompatible` | 版本不兼容 | 导入的包 schemaVersion 主版本号与当前应用不匹配时记录 |
+
+### 审计恢复日志上下文
+
+`audit_restore` 日志的 `context` 包含以下额外字段：
+
+```json
+{
+  "restoredLogCount": 5,
+  "restoredLogIds": ["log-1", "log-2", "log-3", "log-4", "log-5"]
+}
+```
+
+- `restoredLogCount`：从包内恢复的历史记录条数
+- `restoredLogIds`：恢复的历史记录 ID 列表
+
+### 版本不兼容日志上下文
+
+`version_incompatible` 日志的 `context` 包含以下额外字段：
+
+```json
+{
+  "sourcePackageSchemaVersion": "99.0.0",
+  "currentSchemaVersion": "1.0.0",
+  "incompatibilityReason": "包版本不兼容：包 schema 版本为 99.0.0，当前应用支持 1.0.0（主版本号不匹配：99 vs 1），无法导入"
+}
+```
+
+### 包结构新增字段
+
+会话包 `ReviewSessionPackage` 新增 `schemaVersion` 字段：
+
+```json
+{
+  "id": "pkg-xxx",
+  "name": "测试包",
+  "version": "1.0.0",
+  "schemaVersion": "1.0.0",
+  "operationLogs": [ ... ],
+  "checksum": "xxx"
+}
+```
+
+- `schemaVersion`：包结构版本号，用于兼容性检查
+- 当前版本：`"1.0.0"`
+- 主版本号不一致时拒绝导入并给出明确提示
+
+### 四条核心验证链路
+
+自动化验证位于 [import-export.test.ts](file:///d:/workSpace/AI__SPACE/02-label/zgw-00138/src/__tests__/import-export.test.ts) 的 `audit-recovery - 会话审计恢复验证` 分组：
+
+1. **链路1：清空日志后恢复**
+   - 发布会话包 → 导出序列化 → 清空本地 `sessionPackageLogs` → 重新导入/回放
+   - 验证：包内历史 publish 日志恢复到本地；audit_restore 日志含 `restoredLogCount > 0`
+
+2. **链路2：冲突分支留痕**
+   - 发布 v1.0.0 → 导出 → 发布 v2.0.0 → 导入 v1.0.0 触发冲突 → 选择改名
+   - 验证：三步日志按时间排序后，`import_conflict_detected` → `import_conflict_rename` → `import` 顺序正确
+
+3. **链路3：异常包提示**
+   - 缺失字段包：验证每个缺失字段都有明确中文提示
+   - 版本不兼容包（schemaVersion="99.0.0"）：验证提示含版本号和"无法导入"
+   - operationLogs 内部字段缺失：验证具体指出哪条记录哪个字段缺失
+
+4. **链路4：重启后日志与回放都保留**
+   - 发布 → 导出 → 回放 → 模拟重启（setState 恢复持久化数据）
+   - 验证：`sessionPackageLogs` 条数不变、audit_restore 日志完整、回放功能正常
 
 ### 操作记录数据模型
 

@@ -4791,7 +4791,7 @@ describe("session-trail-archive - 会话轨迹归档三条核心链路验证", (
 
     const logsBefore = stateBefore.getPackageLogs();
     expect(logsBefore.some((l) => l.action === "publish")).toBe(true);
-    expect(logsBefore.some((l) => l.action === "restore")).toBe(true);
+    expect(logsBefore.some((l) => l.action === "audit_restore" || l.action === "restore")).toBe(true);
 
     const persistedData = {
       job: stateBefore.job,
@@ -4866,15 +4866,422 @@ describe("session-trail-archive - 会话轨迹归档三条核心链路验证", (
     expect(stateFinal.riskLevelFilter.danger).toBe(true);
 
     const finalLogs = stateFinal.getPackageLogs();
-    expect(finalLogs.some((l) => l.action === "restore")).toBe(true);
-    expect(finalLogs.filter((l) => l.action === "restore").length).toBeGreaterThanOrEqual(2);
+    expect(finalLogs.some((l) => l.action === "audit_restore" || l.action === "restore")).toBe(true);
+    expect(finalLogs.filter((l) => l.action === "audit_restore" || l.action === "restore").length).toBeGreaterThanOrEqual(2);
 
     const finalLogsSorted = [...finalLogs].sort(
       (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
     );
     const finalActions = finalLogsSorted.map((l) => l.action);
     expect(finalActions[0]).toBe("publish");
-    expect(finalActions).toContain("restore");
+    expect(finalActions.some((a) => a === "audit_restore" || a === "restore")).toBe(true);
+  });
+});
+
+describe("audit-recovery - 会话审计恢复验证", () => {
+  const defaultCamera = {
+    position: [0, 80, 0.1] as [number, number, number],
+    target: [0, 0, 0] as [number, number, number],
+  };
+  const allLevels: RiskLevelFilter = { safe: true, warning: true, danger: true };
+
+  beforeEach(async () => {
+    const { useStore } = await import("@/store/useStore");
+    useStore.setState({
+      job: null,
+      currentTime: 0,
+      annotations: [],
+      ignoredRiskIds: [],
+      showIgnored: true,
+      riskLevelFilter: allLevels,
+      camera: defaultCamera,
+      snapshots: {},
+      currentSnapshotId: null,
+      currentJobId: null,
+      snapshotHistory: [],
+      cameraPresets: [],
+      lastImportSuccess: null,
+      lastImportFailure: null,
+      templates: [],
+      sessionPackages: {},
+      sessionPackageLogs: [],
+      currentPackageId: null,
+      lastPublishId: null,
+    });
+  });
+
+  it("链路1: 清空本地日志后恢复 - 包内历史记录恢复到本地", async () => {
+    const { useStore } = await import("@/store/useStore");
+    const store = useStore;
+
+    store.getState().importJob(makeValidJob());
+    store.setState({ annotations: makeAnnotations(3, "danger", 0) });
+
+    const pkg = store.getState().publishSessionPackage("测试包", "1.0.0");
+    expect(pkg).toBeDefined();
+    expect(store.getState().sessionPackageLogs.length).toBeGreaterThan(0);
+
+    const serialized = store.getState().exportPackageToFile(pkg.id);
+
+    store.setState({
+      sessionPackageLogs: [],
+      sessionPackages: {},
+      currentPackageId: null,
+      lastPublishId: null,
+    });
+    expect(store.getState().sessionPackageLogs).toHaveLength(0);
+
+    const importResult = store.getState().importPackageFromFile(serialized);
+    expect(importResult.success).toBe(true);
+
+    const logsAfterImport = store.getState().sessionPackageLogs;
+    const publishLogs = logsAfterImport.filter((l) => l.action === "publish");
+    expect(publishLogs.length).toBeGreaterThanOrEqual(1);
+
+    const exportLogs = logsAfterImport.filter((l) => l.action === "export");
+    expect(exportLogs.length).toBeGreaterThanOrEqual(1);
+
+    const importLogs = logsAfterImport.filter((l) => l.action === "import");
+    expect(importLogs.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("链路1: 清空本地日志后回放恢复 - audit_restore 恢复包内历史", async () => {
+    const { useStore } = await import("@/store/useStore");
+    const store = useStore;
+
+    store.getState().importJob(makeValidJob());
+    store.setState({ annotations: makeAnnotations(2, "warning", 0) });
+
+    const pkg = store.getState().publishSessionPackage("回放测试包", "1.0.0");
+    expect(pkg.operationLogs.length).toBeGreaterThan(0);
+
+    store.setState({ sessionPackageLogs: [] });
+    expect(store.getState().sessionPackageLogs).toHaveLength(0);
+
+    const restoreResult = store.getState().restoreFromPackage(pkg.id);
+    expect(restoreResult.success).toBe(true);
+
+    const logsAfterRestore = store.getState().sessionPackageLogs;
+    const auditRestoreLogs = logsAfterRestore.filter((l) => l.action === "audit_restore");
+    expect(auditRestoreLogs.length).toBe(1);
+    expect(auditRestoreLogs[0].context?.restoredLogCount).toBeGreaterThan(0);
+    expect(auditRestoreLogs[0].context?.restoredLogIds).toBeDefined();
+    expect(auditRestoreLogs[0].message).toContain("审计恢复完成");
+    expect(auditRestoreLogs[0].message).toContain("条历史记录");
+
+    const publishLogsInLocal = logsAfterRestore.filter((l) => l.action === "publish");
+    expect(publishLogsInLocal.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("链路2: 冲突分支留痕 - 三步日志链路完整可追溯", async () => {
+    const { useStore } = await import("@/store/useStore");
+    const store = useStore;
+
+    store.getState().importJob(makeValidJob());
+    store.setState({ annotations: makeAnnotations(2, "danger", 0) });
+
+    const pkg1 = store.getState().publishSessionPackage("冲突测试包", "1.0.0");
+    const serialized = store.getState().exportPackageToFile(pkg1.id);
+
+    store.getState().publishSessionPackage("另一个包", "2.0.0");
+
+    store.setState({ sessionPackageLogs: [] });
+
+    const firstResult = store.getState().importPackageFromFile(serialized);
+    expect(firstResult.conflict).toBeDefined();
+
+    const conflictLogs = store.getState().sessionPackageLogs.filter(
+      (l) => l.action === "import_conflict_detected"
+    );
+    expect(conflictLogs.length).toBe(1);
+    expect(conflictLogs[0].context?.conflictExistingVersion).toBe("1.0.0");
+
+    const resolvedResult = store.getState().importPackageFromFile(serialized, "rename", "1.0.1");
+    expect(resolvedResult.success).toBe(true);
+
+    const allLogs = store.getState().sessionPackageLogs;
+    const sortedLogs = [...allLogs].sort(
+      (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
+    );
+    const actions = sortedLogs.map((l) => l.action);
+
+    const detectedIdx = actions.indexOf("import_conflict_detected");
+    const renameIdx = actions.indexOf("import_conflict_rename");
+    const importIdx = actions.indexOf("import");
+    expect(detectedIdx).toBeLessThan(renameIdx);
+    expect(renameIdx).toBeLessThan(importIdx);
+
+    const renameLog = sortedLogs.find((l) => l.action === "import_conflict_rename");
+    expect(renameLog?.context?.conflictResolution).toBe("rename");
+    expect(renameLog?.context?.conflictNewVersion).toBe("1.0.1");
+  });
+
+  it("链路3: 异常包提示 - 字段缺失给出明确提示", async () => {
+    const { useStore } = await import("@/store/useStore");
+    const store = useStore;
+
+    const badPkg = { id: "pkg-1", version: "1.0.0" };
+    const badContent = JSON.stringify(badPkg);
+
+    const result = store.getState().importPackageFromFile(badContent);
+    expect(result.success).toBe(false);
+    expect(result.errors!.length).toBeGreaterThan(0);
+
+    const hasSpecificError = result.errors!.some((e) =>
+      e.includes("缺少必填字段") && (e.includes("name") || e.includes("名称"))
+    );
+    expect(hasSpecificError).toBe(true);
+
+    const hasSnapshotError = result.errors!.some((e) =>
+      e.includes("snapshot") && (e.includes("缺少") || e.includes("格式错误"))
+    );
+    expect(hasSnapshotError).toBe(true);
+
+    const failureLogs = store.getState().sessionPackageLogs.filter(
+      (l) => l.action === "import_failure"
+    );
+    expect(failureLogs.length).toBe(1);
+  });
+
+  it("链路3: 异常包提示 - 版本不兼容给出明确提示", async () => {
+    const { useStore } = await import("@/store/useStore");
+    const store = useStore;
+
+    store.getState().importJob(makeValidJob());
+    store.setState({ annotations: makeAnnotations(1, "danger", 0) });
+    const pkg = store.getState().publishSessionPackage("版本兼容测试", "1.0.0");
+
+    const serialized = store.getState().exportPackageToFile(pkg.id);
+    const parsed = JSON.parse(serialized);
+    parsed.schemaVersion = "99.0.0";
+    const incompatibleContent = JSON.stringify(parsed);
+
+    const result = store.getState().importPackageFromFile(incompatibleContent);
+    expect(result.success).toBe(false);
+    expect(result.errors!.some((e) => e.includes("版本不兼容"))).toBe(true);
+    expect(result.errors!.some((e) => e.includes("99.0.0"))).toBe(true);
+    expect(result.errors!.some((e) => e.includes("无法导入"))).toBe(true);
+
+    const viLogs = store.getState().sessionPackageLogs.filter(
+      (l) => l.action === "version_incompatible"
+    );
+    expect(viLogs.length).toBe(1);
+    expect(viLogs[0].context?.sourcePackageSchemaVersion).toBe("99.0.0");
+    expect(viLogs[0].context?.incompatibilityReason).toContain("版本不兼容");
+  });
+
+  it("链路3: 异常包提示 - operationLogs 字段缺失项给出具体提示", async () => {
+    const { useStore } = await import("@/store/useStore");
+    const store = useStore;
+
+    store.getState().importJob(makeValidJob());
+    store.setState({ annotations: makeAnnotations(1, "danger", 0) });
+    const pkg = store.getState().publishSessionPackage("日志字段测试", "1.0.0");
+    const serialized = store.getState().exportPackageToFile(pkg.id);
+    const parsed = JSON.parse(serialized);
+
+    parsed.operationLogs = [
+      { id: "log-bad", timestamp: new Date().toISOString(), success: true, message: "bad" },
+    ];
+
+    const badContent = JSON.stringify(parsed);
+    const result = store.getState().importPackageFromFile(badContent);
+    expect(result.success).toBe(false);
+    expect(result.errors!.some((e) => e.includes("operationLogs[0]") && e.includes("action"))).toBe(true);
+  });
+
+  it("链路4: 重启后日志与回放都保留", async () => {
+    const { useStore } = await import("@/store/useStore");
+    const store = useStore;
+
+    store.getState().importJob(makeValidJob());
+    store.setState({ annotations: makeAnnotations(2, "danger", 0) });
+
+    const pkg = store.getState().publishSessionPackage("重启保留测试", "1.0.0");
+    const serialized = store.getState().exportPackageToFile(pkg.id);
+
+    store.getState().restoreFromPackage(pkg.id);
+
+    const stateBefore = store.getState();
+    const logsBefore = stateBefore.sessionPackageLogs;
+    const packagesBefore = stateBefore.sessionPackages;
+    const auditLogsBefore = logsBefore.filter((l) => l.action === "audit_restore");
+    expect(auditLogsBefore.length).toBe(1);
+
+    const persisted = {
+      job: stateBefore.job,
+      cameraPresets: stateBefore.cameraPresets,
+      camera: stateBefore.camera,
+      annotations: stateBefore.annotations,
+      ignoredRiskIds: stateBefore.ignoredRiskIds,
+      showIgnored: stateBefore.showIgnored,
+      riskLevelFilter: stateBefore.riskLevelFilter,
+      lastImportSuccess: stateBefore.lastImportSuccess,
+      lastImportFailure: stateBefore.lastImportFailure,
+      snapshots: stateBefore.snapshots,
+      currentSnapshotId: stateBefore.currentSnapshotId,
+      currentJobId: stateBefore.currentJobId,
+      snapshotHistory: stateBefore.snapshotHistory,
+      templates: stateBefore.templates,
+      sessionPackages: stateBefore.sessionPackages,
+      sessionPackageLogs: stateBefore.sessionPackageLogs,
+      currentPackageId: stateBefore.currentPackageId,
+      lastPublishId: stateBefore.lastPublishId,
+    };
+
+    store.setState({
+      ...persisted,
+      isPlaying: false,
+      playbackSpeed: 1,
+      errors: [],
+      rightPanelOpen: true,
+    });
+
+    const stateAfter = store.getState();
+    expect(stateAfter.sessionPackageLogs.length).toBe(logsBefore.length);
+
+    const auditLogsAfter = stateAfter.sessionPackageLogs.filter(
+      (l) => l.action === "audit_restore"
+    );
+    expect(auditLogsAfter.length).toBe(1);
+    expect(auditLogsAfter[0].message).toContain("审计恢复完成");
+
+    expect(stateAfter.sessionPackages).toEqual(packagesBefore);
+
+    const restoreResult = stateAfter.restoreFromPackage(pkg.id);
+    expect(restoreResult.success).toBe(true);
+  });
+
+  it("重复导入去重 - 同一包多次导入不会重复日志", async () => {
+    const { useStore } = await import("@/store/useStore");
+    const store = useStore;
+
+    store.getState().importJob(makeValidJob());
+    store.setState({ annotations: makeAnnotations(2, "danger", 0) });
+
+    const pkg = store.getState().publishSessionPackage("去重测试", "1.0.0");
+    const serialized = store.getState().exportPackageToFile(pkg.id);
+
+    store.setState({ sessionPackages: {}, sessionPackageLogs: [], currentPackageId: null, lastPublishId: null });
+
+    const firstImport = store.getState().importPackageFromFile(serialized);
+    expect(firstImport.success).toBe(true);
+    const logCountAfterFirst = store.getState().sessionPackageLogs.length;
+
+    const secondImport = store.getState().importPackageFromFile(
+      serialized, "rename", "1.0.1"
+    );
+    expect(secondImport.success).toBe(true);
+
+    const logsAfterSecond = store.getState().sessionPackageLogs;
+    const logIds = logsAfterSecond.map((l) => l.id);
+    const uniqueLogIds = new Set(logIds);
+    expect(logIds.length).toBe(uniqueLogIds.size);
+
+    const publishLogs = logsAfterSecond.filter((l) => l.action === "publish");
+    expect(publishLogs.length).toBe(1);
+  });
+
+  it("重复回放去重 - 同一包多次回放不重复历史日志", async () => {
+    const { useStore } = await import("@/store/useStore");
+    const store = useStore;
+
+    store.getState().importJob(makeValidJob());
+    store.setState({ annotations: makeAnnotations(2, "danger", 0) });
+
+    const pkg = store.getState().publishSessionPackage("回放去重测试", "1.0.0");
+
+    store.getState().restoreFromPackage(pkg.id);
+    const logCountAfterFirst = store.getState().sessionPackageLogs.length;
+
+    store.getState().restoreFromPackage(pkg.id);
+    const logCountAfterSecond = store.getState().sessionPackageLogs.length;
+
+    const auditRestoreLogs = store.getState().sessionPackageLogs.filter(
+      (l) => l.action === "audit_restore"
+    );
+    expect(auditRestoreLogs.length).toBe(2);
+
+    const publishLogs = store.getState().sessionPackageLogs.filter(
+      (l) => l.action === "publish"
+    );
+    expect(publishLogs.length).toBe(1);
+
+    const allLogIds = store.getState().sessionPackageLogs.map((l) => l.id);
+    const uniqueLogIds = new Set(allLogIds);
+    expect(allLogIds.length).toBe(uniqueLogIds.size);
+  });
+
+  it("导出操作产生 export 日志", async () => {
+    const { useStore } = await import("@/store/useStore");
+    const store = useStore;
+
+    store.getState().importJob(makeValidJob());
+    store.setState({ annotations: makeAnnotations(1, "danger", 0) });
+
+    const pkg = store.getState().publishSessionPackage("导出日志测试", "1.0.0");
+
+    store.getState().exportPackageToFile(pkg.id);
+
+    const exportLogs = store.getState().sessionPackageLogs.filter(
+      (l) => l.action === "export"
+    );
+    expect(exportLogs.length).toBe(1);
+    expect(exportLogs[0].message).toContain("导出会话包");
+    expect(exportLogs[0].success).toBe(true);
+
+    const updatedPkg = store.getState().getPackageById(pkg.id);
+    const pkgExportLogs = updatedPkg?.operationLogs.filter((l) => l.action === "export") || [];
+    expect(pkgExportLogs.length).toBe(1);
+  });
+
+  it("schemaVersion 在新建包中正确设置", async () => {
+    const { useStore } = await import("@/store/useStore");
+    const store = useStore;
+
+    store.getState().importJob(makeValidJob());
+    store.setState({ annotations: makeAnnotations(1, "danger", 0) });
+
+    const pkg = store.getState().publishSessionPackage("版本测试", "1.0.0");
+    expect(pkg.schemaVersion).toBe("1.0.0");
+
+    const serialized = store.getState().exportPackageToFile(pkg.id);
+    const parsed = JSON.parse(serialized);
+    expect(parsed.schemaVersion).toBe("1.0.0");
+  });
+
+  it("旧版本包(无 schemaVersion)仍允许导入", async () => {
+    const { useStore } = await import("@/store/useStore");
+    const store = useStore;
+
+    store.getState().importJob(makeValidJob());
+    store.setState({ annotations: makeAnnotations(1, "danger", 0) });
+    const pkg = store.getState().publishSessionPackage("旧版本测试", "1.0.0");
+
+    const pkgObj = JSON.parse(JSON.stringify(pkg));
+    delete pkgObj.schemaVersion;
+
+    const legacyChecksumContent = JSON.stringify({
+      version: pkgObj.version,
+      snapshot: pkgObj.snapshot,
+      templateSources: pkgObj.templateSources,
+      operationLogs: pkgObj.operationLogs,
+      createdAt: pkgObj.createdAt,
+    });
+    let hash = 0;
+    for (let i = 0; i < legacyChecksumContent.length; i++) {
+      const char = legacyChecksumContent.charCodeAt(i);
+      hash = (hash << 5) - hash + char;
+      hash = hash & hash;
+    }
+    pkgObj.checksum = Math.abs(hash).toString(16);
+
+    const oldContent = JSON.stringify(pkgObj);
+
+    store.setState({ sessionPackages: {}, currentPackageId: null, lastPublishId: null });
+    const result = store.getState().importPackageFromFile(oldContent);
+    expect(result.success).toBe(true);
+    expect(result.package?.schemaVersion).toBe("0.0.0");
   });
 });
 

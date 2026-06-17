@@ -436,6 +436,12 @@ export default function SessionPackageWorkbench() {
         return "冲突覆盖导入";
       case "restore":
         return "回放恢复";
+      case "audit_restore":
+        return "审计恢复";
+      case "export":
+        return "导出";
+      case "version_incompatible":
+        return "版本不兼容";
       case "expire":
         return "标记过期";
       default:
@@ -834,6 +840,12 @@ export default function SessionPackageWorkbench() {
                               <ShieldAlert size={12} className="text-amber-400" />
                             ) : log.action === "import_failure" ? (
                               <XCircle size={12} className="text-red-400" />
+                            ) : log.action === "version_incompatible" ? (
+                              <AlertTriangle size={12} className="text-red-400" />
+                            ) : log.action === "audit_restore" ? (
+                              <History size={12} className="text-cyan-400" />
+                            ) : log.action === "export" ? (
+                              <Download size={12} className="text-green-400" />
                             ) : (
                               <CheckCircle2
                                 size={12}
@@ -850,12 +862,16 @@ export default function SessionPackageWorkbench() {
                               className={`px-1.5 py-0.5 rounded ${
                                 log.action === "publish" ||
                                 log.action === "update" ||
-                                log.action === "import"
+                                log.action === "import" ||
+                                log.action === "audit_restore"
                                   ? "bg-cyan-600/20 text-cyan-300"
-                                  : log.action === "revoke"
+                                  : log.action === "export"
+                                  ? "bg-green-600/20 text-green-300"
+                                  : log.action === "revoke" ||
+                                    log.action === "expire"
                                   ? "bg-amber-600/20 text-amber-300"
-                                  : log.action === "expire"
-                                  ? "bg-amber-600/20 text-amber-300"
+                                  : log.action === "version_incompatible"
+                                  ? "bg-red-600/20 text-red-300"
                                   : "bg-red-600/20 text-red-300"
                               }`}
                             >

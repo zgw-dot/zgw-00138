@@ -19,6 +19,8 @@ import {
   exportToCSVFromSnapshot,
 } from "@/utils/export";
 
+export const CURRENT_PACKAGE_SCHEMA_VERSION = "1.0.0";
+
 function generateId(): string {
   return `pkg-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
 }
@@ -73,6 +75,18 @@ function computePackageChecksum(pkg: ReviewSessionPackage): string {
     templateSources: pkg.templateSources,
     operationLogs: pkg.operationLogs,
     createdAt: pkg.createdAt,
+    schemaVersion: pkg.schemaVersion,
+  });
+  return hashString(content);
+}
+
+function computeLegacyPackageChecksum(obj: Record<string, unknown>): string {
+  const content = JSON.stringify({
+    version: obj.version,
+    snapshot: obj.snapshot,
+    templateSources: obj.templateSources,
+    operationLogs: obj.operationLogs,
+    createdAt: obj.createdAt,
   });
   return hashString(content);
 }
@@ -192,6 +206,7 @@ export function createSessionPackage(
     templateSources: usedTemplates,
     operationLogs: [],
     checksum: "",
+    schemaVersion: CURRENT_PACKAGE_SCHEMA_VERSION,
   };
 
   pkg.checksum = computePackageChecksum(pkg);
@@ -257,6 +272,7 @@ export function updateSessionPackage(
     templateSources: usedTemplates,
     operationLogs: existing.operationLogs ? [...existing.operationLogs] : [],
     checksum: "",
+    schemaVersion: existing.schemaVersion || CURRENT_PACKAGE_SCHEMA_VERSION,
   };
 
   updated.checksum = computePackageChecksum(updated);
@@ -424,6 +440,68 @@ export function createConflictResolutionLog(
   };
 }
 
+export function createAuditRestoreLog(
+  pkg: ReviewSessionPackage,
+  restoredLogCount: number,
+  restoredLogIds: string[],
+  context?: SessionPackageLogContext
+): SessionPackageLogEntry {
+  return {
+    id: generateLogId(),
+    packageId: pkg.id,
+    packageVersion: pkg.version,
+    packageName: pkg.name,
+    action: "audit_restore",
+    timestamp: new Date().toISOString(),
+    success: true,
+    message: `审计恢复完成：从包内恢复 ${restoredLogCount} 条历史记录，并完成回放`,
+    context: {
+      ...context,
+      restoredLogCount,
+      restoredLogIds,
+    },
+  };
+}
+
+export function createExportLog(
+  pkg: ReviewSessionPackage,
+  context?: SessionPackageLogContext
+): SessionPackageLogEntry {
+  return {
+    id: generateLogId(),
+    packageId: pkg.id,
+    packageVersion: pkg.version,
+    packageName: pkg.name,
+    action: "export",
+    timestamp: new Date().toISOString(),
+    success: true,
+    message: `导出会话包 v${pkg.version} 成功`,
+    context,
+  };
+}
+
+export function createVersionIncompatibleLog(
+  sourceSchemaVersion: string | undefined,
+  currentSchemaVersion: string,
+  reason: string
+): SessionPackageLogEntry {
+  return {
+    id: generateLogId(),
+    packageId: "unknown",
+    packageVersion: "unknown",
+    packageName: "unknown",
+    action: "version_incompatible",
+    timestamp: new Date().toISOString(),
+    success: false,
+    message: reason,
+    context: {
+      sourcePackageSchemaVersion: sourceSchemaVersion,
+      currentSchemaVersion,
+      incompatibilityReason: reason,
+    },
+  };
+}
+
 export function appendLogToPackage(
   pkg: ReviewSessionPackage,
   log: SessionPackageLogEntry
@@ -446,6 +524,18 @@ export function mergeLogsFromPackage(
   return [...existingLogs, ...newLogs];
 }
 
+export function mergeAndSortLogs(
+  existingLogs: SessionPackageLogEntry[],
+  incomingLogs: SessionPackageLogEntry[]
+): SessionPackageLogEntry[] {
+  const existingIds = new Set(existingLogs.map((l) => l.id));
+  const dedupedIncoming = incomingLogs.filter((l) => !existingIds.has(l.id));
+  const merged = [...existingLogs, ...dedupedIncoming];
+  return merged.sort(
+    (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
+  );
+}
+
 export function serializePackage(pkg: ReviewSessionPackage): string {
   return JSON.stringify(pkg, null, 2);
 }
@@ -454,68 +544,134 @@ export function validatePackageStructure(raw: unknown): { valid: boolean; errors
   const errors: string[] = [];
 
   if (!raw || typeof raw !== "object") {
-    errors.push("包数据格式错误");
+    errors.push("包数据格式错误：输入不是有效对象");
     return { valid: false, errors };
   }
 
   const obj = raw as Record<string, unknown>;
 
-  const requiredFields = [
-    "id",
-    "version",
-    "name",
-    "jobId",
-    "jobMeta",
-    "createdAt",
-    "updatedAt",
-    "isExpired",
-    "snapshot",
-    "exportedFiles",
-    "signature",
-    "templateSources",
-    "operationLogs",
-    "checksum",
+  const requiredFields: [string, string][] = [
+    ["id", "包 ID (id)"],
+    ["version", "版本号 (version)"],
+    ["name", "包名称 (name)"],
+    ["jobId", "作业 ID (jobId)"],
+    ["jobMeta", "作业元信息 (jobMeta)"],
+    ["createdAt", "创建时间 (createdAt)"],
+    ["updatedAt", "更新时间 (updatedAt)"],
+    ["isExpired", "过期标记 (isExpired)"],
+    ["snapshot", "场景快照 (snapshot)"],
+    ["exportedFiles", "导出产物 (exportedFiles)"],
+    ["signature", "数据签名 (signature)"],
+    ["templateSources", "模板来源 (templateSources)"],
+    ["operationLogs", "操作日志 (operationLogs)"],
+    ["checksum", "校验和 (checksum)"],
   ];
 
-  for (const field of requiredFields) {
+  for (const [field, label] of requiredFields) {
     if (!(field in obj)) {
-      errors.push(`缺少必填字段: ${field}`);
+      errors.push(`缺少必填字段: ${label}`);
     }
   }
 
   if (obj.snapshot && typeof obj.snapshot === "object") {
     const snapshot = obj.snapshot as Record<string, unknown>;
-    const snapshotFields = ["id", "name", "jobId", "annotations", "filter", "riskStats"];
-    for (const field of snapshotFields) {
+    const snapshotFields: [string, string][] = [
+      ["id", "快照 ID"],
+      ["name", "快照名称"],
+      ["jobId", "快照作业 ID"],
+      ["annotations", "批注列表"],
+      ["filter", "筛选条件"],
+      ["riskStats", "风险统计"],
+    ];
+    for (const [field, label] of snapshotFields) {
       if (!(field in snapshot)) {
-        errors.push(`snapshot 缺少字段: ${field}`);
+        errors.push(`snapshot 缺少字段: ${label} (${field})`);
       }
     }
-  } else {
-    errors.push("snapshot 格式错误");
+  } else if (!errors.some(e => e.includes("snapshot"))) {
+    errors.push("snapshot 格式错误：不是有效对象");
   }
 
   if (obj.exportedFiles && typeof obj.exportedFiles === "object") {
     const files = obj.exportedFiles as Record<string, unknown>;
     if (!files.json || typeof files.json !== "string") {
-      errors.push("exportedFiles.json 格式错误");
+      errors.push("exportedFiles.json 格式错误：缺少或非字符串");
     }
     if (!files.csv || typeof files.csv !== "string") {
-      errors.push("exportedFiles.csv 格式错误");
+      errors.push("exportedFiles.csv 格式错误：缺少或非字符串");
     }
-  } else {
-    errors.push("exportedFiles 格式错误");
+  } else if (!errors.some(e => e.includes("exportedFiles"))) {
+    errors.push("exportedFiles 格式错误：不是有效对象");
   }
 
-  if (errors.length > 0) {
+  if (obj.operationLogs !== undefined && !Array.isArray(obj.operationLogs)) {
+    errors.push("operationLogs 格式错误：应为数组");
+  }
+
+  if (obj.operationLogs && Array.isArray(obj.operationLogs)) {
+    for (let i = 0; i < obj.operationLogs.length; i++) {
+      const log = obj.operationLogs[i] as Record<string, unknown> | undefined;
+      if (!log || typeof log !== "object") {
+        errors.push(`operationLogs[${i}] 格式错误：不是有效对象`);
+        continue;
+      }
+      const logRequired: [string, string][] = [
+        ["id", "日志 ID"],
+        ["action", "动作类型"],
+        ["timestamp", "时间戳"],
+        ["success", "成功标记"],
+      ];
+      for (const [field, label] of logRequired) {
+        if (!(field in log)) {
+          errors.push(`operationLogs[${i}] 缺少字段: ${label} (${field})`);
+        }
+      }
+    }
+  }
+
+  if (!obj.schemaVersion) {
+    errors.push(
+      `包缺少 schemaVersion 字段，当前应用支持版本 ${CURRENT_PACKAGE_SCHEMA_VERSION}，该包可能来自旧版本应用，部分功能可能不兼容`
+    );
+  } else if (typeof obj.schemaVersion === "string") {
+    const pkgMajor = obj.schemaVersion.split(".")[0];
+    const currentMajor = CURRENT_PACKAGE_SCHEMA_VERSION.split(".")[0];
+    if (pkgMajor !== currentMajor) {
+      errors.push(
+        `包版本不兼容：包 schema 版本为 ${obj.schemaVersion}，当前应用支持 ${CURRENT_PACKAGE_SCHEMA_VERSION}（主版本号不匹配：${pkgMajor} vs ${currentMajor}），无法导入`
+      );
+    }
+  }
+
+  if (errors.some(e => e.includes("版本不兼容") && e.includes("无法导入"))) {
+    return { valid: false, errors };
+  }
+
+  const schemaWarningIdx = errors.findIndex(e => e.includes("schemaVersion") && e.includes("旧版本"));
+  const realErrors = errors.filter((_, idx) => idx !== schemaWarningIdx);
+
+  if (realErrors.length > 0) {
     return { valid: false, errors };
   }
 
   const pkg = obj as unknown as ReviewSessionPackage;
+  const isLegacyPackage = !obj.schemaVersion;
+  if (!pkg.schemaVersion) {
+    (pkg as any).schemaVersion = "0.0.0";
+  }
 
   if (!verifyPackageChecksum(pkg)) {
-    errors.push("包校验和不匹配，数据可能已被篡改");
-    return { valid: false, errors };
+    if (isLegacyPackage) {
+      const legacyChecksum = computeLegacyPackageChecksum(obj as Record<string, unknown>);
+      const storedChecksum = (obj as Record<string, unknown>).checksum;
+      if (legacyChecksum !== storedChecksum) {
+        errors.push("包校验和不匹配，数据可能已被篡改");
+        return { valid: false, errors };
+      }
+    } else {
+      errors.push("包校验和不匹配，数据可能已被篡改");
+      return { valid: false, errors };
+    }
   }
 
   return { valid: true, errors: [], pkg };
@@ -573,6 +729,7 @@ export function restoreFromPackage(
   riskLevelFilter: RiskLevelFilter;
   ignoredRiskIds: string[];
   templates: AnnotationTemplate[];
+  operationLogs: SessionPackageLogEntry[];
 } {
   const snapshot = pkg.snapshot;
 
@@ -590,6 +747,7 @@ export function restoreFromPackage(
     riskLevelFilter: { ...snapshot.filter.riskLevelFilter },
     ignoredRiskIds: [...snapshot.filter.ignoredRiskIds],
     templates: pkg.templateSources.map((t) => ({ ...t })),
+    operationLogs: [...(pkg.operationLogs || [])],
   };
 }
 
