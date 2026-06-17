@@ -996,6 +996,9 @@ export const useStore = create<AppState>()(
             set((s) => ({
               sessionPackageLogs: [...s.sessionPackageLogs, ...pendingLogs],
             }));
+            if (resolution === "cancel") {
+              return { success: false, cancelled: true };
+            }
             return { success: false };
           }
 

@@ -223,6 +223,7 @@ export interface ImportResult {
   package?: ReviewSessionPackage;
   conflict?: ImportConflictInfo;
   errors?: string[];
+  cancelled?: boolean;
 }
 
 export interface DataSignature {

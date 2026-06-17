@@ -8,6 +8,11 @@ export default defineConfig({
   build: {
     sourcemap: 'hidden',
   },
+  test: {
+    environment: 'jsdom',
+    globals: true,
+    setupFiles: ['./src/__tests__/setup.ts'],
+  },
   plugins: [
     react({
       babel: {

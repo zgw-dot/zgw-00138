@@ -342,7 +342,7 @@ export default function SessionPackageWorkbench() {
         "cancel",
         undefined
       );
-      if (!result.success && !result.conflict) {
+      if (!result.success && !result.conflict && !result.cancelled) {
         showToast(
           "error",
           `记录取消日志失败: ${(result.errors || []).join(", ")}`
@@ -366,7 +366,7 @@ export default function SessionPackageWorkbench() {
       conflictResolution,
       conflictNewVersion.trim() || undefined
     );
-    if (result.success) {
+    if (result.success || result.cancelled) {
       showToast(
         "success",
         conflictResolution === "overwrite"
