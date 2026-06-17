@@ -4,6 +4,7 @@ import TimelineControl from "@/components/TimelineControl";
 import CameraPanel from "@/components/CameraPanel";
 import AnnotationPanel from "@/components/AnnotationPanel";
 import ExportPanel from "@/components/ExportPanel";
+import SessionPackageWorkbench from "@/components/SessionPackageWorkbench";
 
 export default function Home() {
   return (
@@ -14,6 +15,7 @@ export default function Home() {
 
       <div className="fixed top-4 left-1/2 -translate-x-1/2 z-50 flex items-center gap-3">
         <ExportPanel />
+        <SessionPackageWorkbench />
       </div>
 
       <ImportPanel />
